@@ -1,0 +1,6 @@
+data/*.db
+data/*.db-shm
+data/*.db-wal
+outputs/
+docs/
+TechGuard-验收文档-v0.1.md

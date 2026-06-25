@@ -1,0 +1,617 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TechGuard 银发守护服务台</title>
+    <link rel="stylesheet" href="src/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">TechGuard</p>
+        <h1>银发守护服务台</h1>
+      </div>
+      <div class="topbar-actions">
+        <div class="status-strip" aria-label="系统状态">
+          <span class="status-dot"></span>
+          <span>本地运行中</span>
+        </div>
+        <div class="role-chip is-hidden" id="currentRoleChip">
+          <span id="currentRoleName">未登录</span>
+          <button id="logoutRole" type="button">切换</button>
+        </div>
+      </div>
+    </header>
+
+    <section class="login-screen" id="loginScreen">
+      <div class="login-panel">
+        <p class="eyebrow">账号登录</p>
+        <h2>家人和长辈各用自己的入口</h2>
+        <p>家属负责设置吃药、任务和天气关怀，长辈登录后只看今天该做什么。</p>
+        <form class="login-form" id="loginForm">
+          <label class="field">
+            <span>登录名</span>
+            <input id="loginUsername" type="text" autocomplete="username" placeholder="caregiver 或 elder" />
+          </label>
+          <label class="field">
+            <span>密码</span>
+            <input id="loginPassword" type="password" autocomplete="current-password" placeholder="demo1234" />
+          </label>
+          <button class="primary-button" type="submit">登录</button>
+          <p class="form-error" id="loginError"></p>
+        </form>
+        <div class="login-hints">
+          <span>家属端：caregiver / demo1234</span>
+          <span>长辈端：elder / demo1234</span>
+        </div>
+      </div>
+    </section>
+
+    <main class="app-shell is-hidden" id="appShell">
+      <aside class="rail" aria-label="服务导航">
+        <section class="elder-profile">
+          <span class="avatar" aria-hidden="true">护</span>
+          <div>
+            <h2 id="profileTitle">张爷爷</h2>
+            <p id="profileSubtitle">独居老人 · 子女联系人：小丽</p>
+          </div>
+        </section>
+
+        <nav class="nav-list" aria-label="模块导航">
+          <a href="#fraud" data-nav-role="elder">防骗检测</a>
+          <a href="#bloodPressure" data-nav-role="elder">血压记录</a>
+          <a href="#checkupUpload" data-nav-role="elder">体检分析</a>
+          <a href="#memory" data-nav-role="elder">生活记录</a>
+          <a href="#travel" data-nav-role="elder">出行帮助</a>
+          <a href="#alerts" data-nav-role="family">告警中心</a>
+          <a href="#careConfig" data-nav-role="family">提醒配置</a>
+          <a href="#taskConfig" data-nav-role="family">任务安排</a>
+          <a href="#weatherConfig" data-nav-role="family">天气关怀</a>
+          <a href="#healthRecords" data-nav-role="family">健康档案</a>
+          <a href="#careRecords" data-nav-role="family">照护记录</a>
+          <a href="#roleManagement" data-nav-role="family">成员管理</a>
+          <a href="#logs" data-nav-role="shared">操作日志</a>
+        </nav>
+
+        <section class="acceptance">
+          <h2 id="sidePanelTitle">今日守护事项</h2>
+          <ul id="sidePanelList">
+            <li>可疑短信先检测</li>
+            <li>吃药、血压随手记</li>
+            <li>出门路线慢慢看</li>
+            <li>危险情况自动提醒家人</li>
+          </ul>
+        </section>
+      </aside>
+
+      <section class="workspace">
+        <section class="hero-panel" aria-labelledby="overview-title">
+          <div>
+            <p class="eyebrow" id="workspaceEyebrow">长辈工作台</p>
+            <h2 id="overview-title">把看不懂的手机消息，变成听得懂的安全提醒。</h2>
+            <p id="overviewCopy">查看家人设置的提醒，遇到可疑消息和出门安排时从这里处理。</p>
+          </div>
+          <div class="metric-row" aria-label="核心指标">
+            <div>
+              <strong id="fraudCount">0</strong>
+              <span>高危识别</span>
+            </div>
+            <div>
+              <strong id="alertCount">0</strong>
+              <span>告警生成</span>
+            </div>
+            <div>
+              <strong id="memoryCount">0</strong>
+              <span>记忆记录</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="module-grid">
+          <article class="module" id="elderReminders" data-role-view="elder">
+            <div class="module-heading">
+              <div>
+                <p class="eyebrow">家人设置</p>
+                <h2>今日提醒</h2>
+              </div>
+              <span class="small-badge" id="todayReminderCount">0 项</span>
+            </div>
+            <div class="reminder-stack" id="elderReminderList">
+              <p class="muted">暂无家人设置的提醒。</p>
+            </div>
+            <div class="button-row push-row">
+              <button class="secondary-button" id="enablePush" type="button">开启手机提醒</button>
+              <button class="primary-button" id="contactCaregiver" type="button">一键联系家属</button>
+            </div>
+            <p class="send-status" id="pushStatus">安卓手机建议使用 Chrome 打开并允许通知。</p>
+          </article>
+
+          <article class="module" id="fraud" data-role-view="elder">
+            <div class="module-heading">
+              <div>
+                <p class="eyebrow">防骗守护</p>
+                <h2>短信粘贴识别</h2>
+              </div>
+              <button class="ghost-button" id="loadFraudSample" type="button">填入示例</button>
+            </div>
+
+            <label class="field">
+              <span>复制短信后粘贴到这里</span>
+              <textarea id="fraudInput" rows="5" placeholder="网页不能自动读取手机短信。请把可疑短信复制后粘贴到这里。"></textarea>
+            </label>
+
+            <div class="button-row">
+              <button class="primary-button" id="analyzeFraud" type="button">开始检测</button>
+              <button class="secondary-button" id="clearFraud" type="button">清空</button>
+            </div>
+
+            <div class="result-split">
+              <section class="risk-meter" aria-live="polite">
+                <span>欺诈评分</span>
+                <strong id="fraudScore">--</strong>
+                <div class="meter-track">
+                  <div id="fraudMeter" class="meter-fill"></div>
+                </div>
+                <p id="fraudLevel">等待检测</p>
+              </section>
+
+              <section class="plain-output">
+                <h3>给老人的回复</h3>
+                <p id="elderReply">输入内容后，小护会用老人听得懂的话说明风险。</p>
+              </section>
+            </div>
+
+            <section class="plain-output">
+              <h3>风险原因</h3>
+              <ul id="riskReasons" class="reason-list">
+                <li>暂无检测结果</li>
+              </ul>
+            </section>
+          </article>
+
+          <article class="module health-module" id="bloodPressure" data-role-view="elder">
+            <div class="module-heading">
+              <div>
+                <p class="eyebrow">健康记录</p>
+                <h2>血压测量</h2>
+              </div>
+              <span class="small-badge" id="bpState">未记录</span>
+            </div>
+            <div class="compact-form health-form">
+              <label class="field">
+                <span>高压</span>
+                <input id="bpSystolic" type="number" inputmode="numeric" min="60" max="260" placeholder="例如：128" />
+              </label>
+              <label class="field">
+                <span>低压</span>
+                <input id="bpDiastolic" type="number" inputmode="numeric" min="40" max="180" placeholder="例如：78" />
+              </label>
+              <label class="field">
+                <span>心率</span>
+                <input id="bpPulse" type="number" inputmode="numeric" min="30" max="220" placeholder="可不填" />
+              </label>
+              <label class="field form-wide">
+                <span>备注</span>
+                <input id="bpNote" type="text" placeholder="例如：早饭后、刚散步回来" />
+              </label>
+              <button class="primary-button" id="saveBloodPressure" type="button">保存血压</button>
+            </div>
+            <section class="health-summary" id="bpAdvice">
+              记录后会显示血压判断和最近趋势。若身体不舒服，请优先联系家人或医生。
+            </section>
+            <div class="chart-wrap">
+              <canvas id="bpChart" width="720" height="260" aria-label="血压趋势曲线"></canvas>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>高压/低压</th>
+                    <th>心率</th>
+                    <th>备注</th>
+                  </tr>
+                </thead>
+                <tbody id="bpList">
+                  <tr>
+                    <td colspan="4">暂无血压记录</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="module health-module" id="checkupUpload" data-role-view="elder">
+            <div class="module-heading">
+              <div>
+                <p class="eyebrow">健康记录</p>
+                <h2>体检报告分析</h2>
+              </div>
+              <span class="small-badge">拍照上传</span>
+            </div>
+            <p class="muted">拍下体检报告清晰的一页，系统会整理重点项目和建议。分析结果只做健康管理提醒，不能替代医生诊断。</p>
+            <label class="field file-field">
+              <span>体检报告照片</span>
+              <input id="checkupImage" type="file" accept="image/png,image/jpeg,image/webp" capture="environment" />
+            </label>
+            <button class="primary-button" id="analyzeCheckup" type="button">上传并分析</button>
+            <section class="health-summary" id="checkupAdvice">
+              请选择一张清晰照片，上传后会在这里显示建议，也会提醒家属查看。
+            </section>
+          </article>
+
+          <article class="module alert-module" id="alerts" data-role-view="family">
+            <div class="module-heading">
+              <div>
+                <p class="eyebrow">亲属看护</p>
+                <h2>告警中心</h2>
+              </div>
+              <span class="small-badge" id="alertState">未触发</span>
+            </div>
+            <p class="muted">
+              长辈端遇到高危可疑信息后，这里会生成给亲属的紧急提醒。
+            </p>
+            <div class="alert-box" id="childAlert">
+              暂无告警。请先运行一条高危反诈测试。
+            </div>
+          </article>
+
+          <article class="module care-config" id="careConfig" data-role-view="family">
+            <div class="module-heading">
+              <div>
+                <p class="eyebrow">手机看护配置</p>
+                <h2>吃药与出行提醒</h2>
+              </div>
+              <span class="small-badge">手机优先</span>
+            </div>
+            <p class="muted">看护人员可以在手机上设置长辈的吃药时间和出行安排。到点或手动发送时，系统会生成亲属提醒，并尝试推送到飞书。</p>
+
+            <div class="config-tabs" aria-label="提醒配置类型">
+              <section class="config-pane">
+                <h3>吃药提醒</h3>
+                <div class="compact-form">
+                  <label class="field">
+                    <span>药品名称</span>
+                    <input id="medicineName" type="text" placeholder="例如：降压药" />
+                  </label>
+                  <label class="field">
+                    <span>用药时间</span>
+                    <input id="medicineTime" type="time" />
+                  </label>
+                  <label class="field">
+                    <span>说明</span>
+                    <input id="medicineDose" type="text" placeholder="例如：饭后，一片" />
+                  </label>
+                  <button class="primary-button" id="addMedicineSchedule" type="button">保存吃药提醒</button>
+                </div>
+              </section>
+
+              <section class="config-pane">
+                <h3>出行看护</h3>
+                <div class="compact-form">
+                  <label class="field">
+                    <span>目的地</span>
+                    <input id="travelDestination" type="text" placeholder="例如：市大剧院" />
+                  </label>
+                  <label class="field">
+                    <span>出行时间</span>
+                    <input id="travelDateTime" type="datetime-local" />
+                  </label>
+                  <label class="field">
+                    <span>备注</span>
+                    <input id="travelCareNote" type="text" placeholder="例如：地铁2号线，少换乘" />
+                  </label>
+                  <button class="primary-button" id="addTravelPlan" type="button">保存出行提醒</button>
+                </div>
+              </section>
+            </div>
+
+            <section class="feishu-panel">
+              <div>
+                <h3>飞书提醒</h3>
+                <p class="muted">填写飞书群机器人地址后可以测试发送。正式使用时建议用随附服务转发，避免地址暴露在手机浏览器里。</p>
+              </div>
+              <label class="field">
+                <span>飞书机器人地址</span>
+                <input id="feishuWebhook" type="url" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." />
+              </label>
+              <div class="button-row">
+                <button class="secondary-button" id="saveFeishu" type="button">保存地址</button>
+                <button class="primary-button" id="testFeishu" type="button">测试提醒</button>
+              </div>
+              <p class="send-status" id="sendStatus">尚未发送提醒。</p>
+            </section>
+
+            <div class="reminder-columns">
+              <section>
+                <h3>吃药计划</h3>
+                <div class="reminder-stack" id="medicineScheduleList">
+                  <p class="muted">暂无吃药提醒。</p>
+                </div>
+              </section>
+              <section>
+                <h3>出行计划</h3>
+                <div class="reminder-stack" id="travelPlanList">
+                  <p class="muted">暂无出行提醒。</p>
+                </div>
+              </section>
+            </div>
+          </article>
+
+          <article class="module" id="taskConfig" data-role-view="family">
+            <div class="module-heading">
+              <div>
+                <p class="eyebrow">日常安排</p>
+                <h2>给奶奶下达任务</h2>
+              </div>
+              <span class="small-badge">完成可追踪</span>
+            </div>
+            <div class="compact-form">
+              <label class="field">
+                <span>任务</span>
+                <input id="taskTitle" type="text" placeholder="例如：下午量血压" />
+              </label>
+              <label class="field">
+                <span>日期</span>
+                <input id="taskDate" type="date" />
+              </label>
+              <label class="field">
+                <span>时间</span>
+                <input id="taskTime" type="time" />
+              </label>
+              <label class="field form-wide">
+                <span>说明</span>
+                <input id="taskDescription" type="text" placeholder="例如：量完告诉我结果" />
+              </label>
+              <button class="primary-button" id="addTask" type="button">保存任务</button>
+            </div>
+            <div class="reminder-stack" id="familyTaskList">
+              <p class="muted">暂无任务。</p>
+            </div>
+          </article>
+
+          <article class="module" id="weatherConfig" data-role-view="family">
+            <div class="module-heading">
+              <div>
+                <p class="eyebrow">天气关怀</p>
+                <h2>设置奶奶所在地区</h2>
+              </div>
+              <span class="small-badge">每日生成</span>
+            </div>
+            <div class="compact-form">
+              <label class="field">
+                <span>城市</span>
+                <input id="weatherCity" type="text" placeholder="例如：上海" />
+              </label>
+              <label class="field">
+                <span>区县</span>
+                <input id="weatherDistrict" type="text" placeholder="例如：浦东新区" />
+              </label>
+              <label class="field">
+                <span>关怀时间</span>
+                <input id="weatherCareTime" type="time" />
+              </label>
+              <button class="primary-button" id="saveWeather" type="button">保存天气关怀</button>
+            </div>
+            <section class="plain-output">
+              <h3>今日天气关怀</h3>
+              <p id="weatherCareText">设置地区后会生成适合奶奶看的天气提醒。</p>
+            </section>
+          </article>
+
+          <article class="module health-module" id="healthRecords" data-role-view="family">
+            <div class="module-heading">
+              <div>
+                <p class="eyebrow">健康档案</p>
+                <h2>血压与体检结果</h2>
+              </div>
+              <span class="small-badge">亲属查看</span>
+            </div>
+            <section class="health-summary" id="familyBpAdvice">
+              暂无血压记录。
+            </section>
+            <div class="chart-wrap">
+              <canvas id="familyBpChart" width="720" height="260" aria-label="亲属端血压趋势曲线"></canvas>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>高压/低压</th>
+                    <th>心率</th>
+                    <th>备注</th>
+                  </tr>
+                </thead>
+                <tbody id="familyBpList">
+                  <tr>
+                    <td colspan="4">暂无血压记录</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <section class="report-list" id="familyCheckupList">
+              <p class="muted">暂无体检报告分析。</p>
+            </section>
+          </article>
+
+          <article class="module" id="memory" data-role-view="elder">
+            <div class="module-heading">
+              <div>
+                <p class="eyebrow">生活照护</p>
+                <h2>生活事件记录</h2>
+              </div>
+              <button class="ghost-button" id="loadMemorySample" type="button">填入吃药样例</button>
+            </div>
+
+            <label class="field">
+              <span>老人说的话</span>
+              <input id="memoryInput" type="text" placeholder="例如：我今天早上八点半吃过降压药了" />
+            </label>
+
+            <div class="button-row">
+              <button class="primary-button" id="saveMemory" type="button">提取并记录</button>
+              <button class="secondary-button" id="askMedication" type="button">问：今天吃药了吗</button>
+            </div>
+
+            <section class="plain-output">
+              <h3>小护回复</h3>
+              <p id="memoryReply">记录后再查询，小护会先看历史记录，再回答老人。</p>
+            </section>
+
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>类型</th>
+                    <th>事件</th>
+                    <th>时间</th>
+                    <th>来源</th>
+                  </tr>
+                </thead>
+                <tbody id="memoryTable">
+                  <tr>
+                    <td colspan="4">暂无记忆记录</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="module" id="elderTasks" data-role-view="elder">
+            <div class="module-heading">
+              <div>
+                <p class="eyebrow">家人安排</p>
+                <h2>今日任务</h2>
+              </div>
+              <span class="small-badge" id="todayTaskCount">0 项</span>
+            </div>
+            <div class="reminder-stack" id="elderTaskList">
+              <p class="muted">暂无今日任务。</p>
+            </div>
+          </article>
+
+          <article class="module" id="travel" data-role-view="elder">
+            <div class="module-heading">
+              <div>
+                <p class="eyebrow">安心出门</p>
+                <h2>出行规划</h2>
+              </div>
+              <button class="ghost-button" id="loadTravelSample" type="button">填入出行样例</button>
+            </div>
+
+            <label class="field">
+              <span>老人出行需求</span>
+              <textarea id="travelInput" rows="4" placeholder="例如：明天闺女让我去大剧院一趟，我不知道明天天气怎么样，也不知道怎么坐车去啊。"></textarea>
+            </label>
+
+            <button class="primary-button" id="planTravel" type="button">生成建议</button>
+
+            <section class="tool-trace">
+              <div>
+                <span>天气工具</span>
+                <strong id="weatherTrace">待调用</strong>
+              </div>
+              <div>
+                <span>地图工具</span>
+                <strong id="routeTrace">待调用</strong>
+              </div>
+            </section>
+
+            <section class="plain-output">
+              <h3>给老人的回复</h3>
+              <p id="travelReply">小护会优先给少换乘、少走路、好理解的路线。</p>
+            </section>
+          </article>
+
+          <article class="module" id="careRecords" data-role-view="family">
+            <div class="module-heading">
+              <div>
+                <p class="eyebrow">照护记录</p>
+                <h2>长辈生活动态</h2>
+              </div>
+              <span class="small-badge">只读查看</span>
+            </div>
+            <p class="muted">亲属可以查看长辈端保存的用药、血压、吃饭和出门记录，但不能替长辈编造记录。</p>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>类型</th>
+                    <th>事件</th>
+                    <th>时间</th>
+                    <th>来源</th>
+                  </tr>
+                </thead>
+                <tbody id="familyMemoryTable">
+                  <tr>
+                    <td colspan="4">暂无照护记录</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="module" id="roleManagement" data-role-view="family">
+            <div class="module-heading">
+              <div>
+                <p class="eyebrow">家庭成员</p>
+                <h2>角色与权限</h2>
+              </div>
+              <span class="small-badge">亲属可设置</span>
+            </div>
+
+            <div class="role-form">
+              <label class="field">
+                <span>姓名</span>
+                <input id="memberName" type="text" placeholder="例如：王阿姨" />
+              </label>
+              <label class="field">
+                <span>关系</span>
+                <input id="memberRelation" type="text" placeholder="例如：护工" />
+              </label>
+              <label class="field">
+                <span>角色</span>
+                <select id="memberRole">
+                  <option value="elder">长辈</option>
+                  <option value="family">亲属</option>
+                </select>
+              </label>
+              <button class="primary-button" id="addMember" type="button">添加成员</button>
+            </div>
+
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>成员</th>
+                    <th>关系</th>
+                    <th>角色</th>
+                    <th>可使用功能</th>
+                  </tr>
+                </thead>
+                <tbody id="roleTable"></tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+
+        <section class="logs" id="logs">
+          <div class="module-heading">
+            <div>
+              <p class="eyebrow">使用记录</p>
+              <h2>操作日志</h2>
+            </div>
+            <button class="secondary-button" id="resetDemo" type="button">重置演示数据</button>
+          </div>
+          <ol id="eventLog" class="event-log">
+            <li>等待开始使用。</li>
+          </ol>
+        </section>
+      </section>
+    </main>
+
+    <script src="src/app.js"></script>
+  </body>
+</html>
