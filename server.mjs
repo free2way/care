@@ -1,8 +1,8 @@
-import { createReadStream, existsSync, mkdirSync, statSync } from "node:fs";
+import { createReadStream, existsSync, statSync } from "node:fs";
 import { createServer } from "node:http";
-import { dirname, extname, join, normalize } from "node:path";
+import { extname, join, normalize } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
-import { DatabaseSync } from "node:sqlite";
+import { createDatabase } from "./src/server/database.mjs";
 
 const root = process.cwd();
 const port = Number(process.env.PORT || 5173);
@@ -23,11 +23,8 @@ const contentTypes = {
   ".webmanifest": "application/manifest+json; charset=utf-8",
 };
 
-mkdirSync(dirname(dbPath), { recursive: true });
-const db = new DatabaseSync(dbPath);
-db.exec("PRAGMA journal_mode = WAL");
-db.exec("PRAGMA foreign_keys = ON");
-initDatabase();
+const db = await createDatabase({ dbPath });
+await initDatabase();
 
 createServer(async (request, response) => {
   try {
@@ -49,7 +46,7 @@ createServer(async (request, response) => {
   }
 }).listen(port, () => {
   console.log(`TechGuard is running at http://127.0.0.1:${port}/`);
-  console.log(`SQLite database: ${dbPath}`);
+  console.log(`Database provider: ${db.label}`);
   console.log(feishuWebhookUrl ? "Feishu relay is enabled." : "Feishu relay is not configured.");
 });
 
@@ -97,7 +94,7 @@ async function login(request, response) {
   const body = await readJson(request);
   const username = String(body.username || "").trim();
   const password = String(body.password || "");
-  const user = db.prepare("SELECT * FROM users WHERE username = ?").get(username);
+  const user = await db.prepare("SELECT * FROM users WHERE username = ?").get(username);
 
   if (!user || user.password_hash !== hashPassword(password)) {
     sendJson(response, 401, { ok: false, message: "登录名或密码不正确" });
@@ -115,14 +112,14 @@ function logout(_request, response) {
   sendJson(response, 200, { ok: true });
 }
 
-function requireUser(request, response, handler) {
+async function requireUser(request, response, handler) {
   const token = getCookie(request, "tg_session");
   const userId = token ? sessions.get(token) : null;
   if (!userId) {
     sendJson(response, 401, { ok: false, message: "请先登录" });
     return;
   }
-  const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
+  const user = await db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
   if (!user) {
     sendJson(response, 401, { ok: false, message: "登录已失效" });
     return;
@@ -130,11 +127,11 @@ function requireUser(request, response, handler) {
   return handler(publicUser(user));
 }
 
-function dashboard(response, user) {
-  const elder = getBoundElder(user);
-  ensureTodayMedicationLogs(elder.id);
+async function dashboard(response, user) {
+  const elder = await getBoundElder(user);
+  await ensureTodayMedicationLogs(elder.id);
   const today = todayDate();
-  const medications = db
+  const medications = await db
     .prepare(
       `SELECT ml.id as log_id, ml.status, ml.completed_at, ms.*
        FROM medication_logs ml
@@ -143,14 +140,14 @@ function dashboard(response, user) {
        ORDER BY ms.time_of_day ASC`
     )
     .all(elder.id, today);
-  const tasks = db
+  const tasks = await db
     .prepare("SELECT * FROM care_tasks WHERE elder_id = ? AND (due_date = ? OR (due_date < ? AND status = 'pending')) ORDER BY due_date DESC, due_time ASC")
     .all(elder.id, today, today);
-  const alerts = db.prepare("SELECT * FROM alerts WHERE elder_id = ? ORDER BY created_at DESC LIMIT 20").all(elder.id);
-  const weather = db.prepare("SELECT * FROM weather_settings WHERE elder_id = ?").get(elder.id) || null;
-  const bloodPressure = db.prepare("SELECT * FROM blood_pressure_logs WHERE elder_id = ? ORDER BY measured_at ASC LIMIT 60").all(elder.id);
-  const checkups = db.prepare("SELECT id, elder_id, uploaded_by, file_name, summary, risk_level, source, created_at FROM checkup_reports WHERE elder_id = ? ORDER BY created_at DESC LIMIT 8").all(elder.id);
-  const report = buildDailyReport(elder.id);
+  const alerts = await db.prepare("SELECT * FROM alerts WHERE elder_id = ? ORDER BY created_at DESC LIMIT 20").all(elder.id);
+  const weather = (await db.prepare("SELECT * FROM weather_settings WHERE elder_id = ?").get(elder.id)) || null;
+  const bloodPressure = await db.prepare("SELECT * FROM blood_pressure_logs WHERE elder_id = ? ORDER BY measured_at ASC LIMIT 60").all(elder.id);
+  const checkups = await db.prepare("SELECT id, elder_id, uploaded_by, file_name, summary, risk_level, source, created_at FROM checkup_reports WHERE elder_id = ? ORDER BY created_at DESC LIMIT 8").all(elder.id);
+  const report = await buildDailyReport(elder.id);
 
   sendJson(response, 200, {
     ok: true,
@@ -174,7 +171,7 @@ function dashboard(response, user) {
 }
 
 async function createBloodPressure(request, response, user) {
-  const elder = getBoundElder(user);
+  const elder = await getBoundElder(user);
   const body = await readJson(request);
   const systolic = Number(body.systolic);
   const diastolic = Number(body.diastolic);
@@ -186,12 +183,12 @@ async function createBloodPressure(request, response, user) {
   const note = String(body.note || "").trim();
   const id = createId("bp");
 
-  db.prepare(
+  await db.prepare(
     `INSERT INTO blood_pressure_logs (id, elder_id, measured_by, systolic, diastolic, pulse, note, measured_at, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(id, elder.id, user.id, Math.round(systolic), Math.round(diastolic), pulse === null ? null : Math.round(pulse), note, measuredAt, nowIso());
 
-  const logs = db.prepare("SELECT * FROM blood_pressure_logs WHERE elder_id = ? ORDER BY measured_at ASC LIMIT 60").all(elder.id);
+  const logs = await db.prepare("SELECT * FROM blood_pressure_logs WHERE elder_id = ? ORDER BY measured_at ASC LIMIT 60").all(elder.id);
   const summary = analyzeBloodPressure(logs);
   const isAbnormal = summary.level === "danger" || summary.level === "warning";
   const caregiver = { id: defaultCaregiverId, role: "caregiver" };
@@ -199,7 +196,7 @@ async function createBloodPressure(request, response, user) {
 
   if (isAbnormal) {
     const message = `TechGuard 血压提醒：${elder.displayName}刚记录血压 ${bpText}，${summary.advice}`;
-    createAlert(elder.id, "blood_pressure", "血压需要关注", message, id);
+    await createAlert(elder.id, "blood_pressure", "血压需要关注", message, id);
     await notifyCaregiver(caregiver, "blood_pressure_abnormal", "血压需要关注", `${elder.displayName}刚记录血压 ${bpText}。\n${summary.advice}`, { feishuCard: buildBloodPressureCard(elder, summary, bpText, note) });
   } else {
     await notifyCaregiver(caregiver, "blood_pressure_recorded", "血压已记录", `${elder.displayName}刚记录血压 ${bpText}，状态${summary.label}。`, { feishuCard: buildBloodPressureCard(elder, summary, bpText, note) });
@@ -207,14 +204,14 @@ async function createBloodPressure(request, response, user) {
   sendJson(response, 200, { ok: true, id, summary });
 }
 
-function bloodPressureList(response, user) {
-  const elder = getBoundElder(user);
-  const bloodPressure = db.prepare("SELECT * FROM blood_pressure_logs WHERE elder_id = ? ORDER BY measured_at ASC LIMIT 60").all(elder.id);
+async function bloodPressureList(response, user) {
+  const elder = await getBoundElder(user);
+  const bloodPressure = await db.prepare("SELECT * FROM blood_pressure_logs WHERE elder_id = ? ORDER BY measured_at ASC LIMIT 60").all(elder.id);
   sendJson(response, 200, { ok: true, bloodPressure, summary: analyzeBloodPressure(bloodPressure) });
 }
 
 async function analyzeCheckup(request, response, user) {
-  const elder = getBoundElder(user);
+  const elder = await getBoundElder(user);
   const body = await readJson(request);
   const imageData = required(body.imageData, "请先上传体检报告照片");
   const fileName = String(body.fileName || "checkup-photo").slice(0, 120);
@@ -223,13 +220,13 @@ async function analyzeCheckup(request, response, user) {
 
   const advice = await generateCheckupAdvice({ elder, imageData, fileName });
   const id = createId("checkup");
-  db.prepare(
+  await db.prepare(
     `INSERT INTO checkup_reports (id, elder_id, uploaded_by, file_name, image_data, summary, advice_json, risk_level, source, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(id, elder.id, user.id, fileName, imageData, advice.summary, JSON.stringify(advice), advice.risk_level, advice.source, nowIso());
 
   const message = `${elder.displayName}上传了体检报告照片。${advice.summary}`;
-  createAlert(elder.id, "checkup", "体检报告已分析", message, id);
+  await createAlert(elder.id, "checkup", "体检报告已分析", message, id);
   await notifyCaregiver(
     { id: defaultCaregiverId, role: "caregiver" },
     "checkup_analyzed",
@@ -242,7 +239,7 @@ async function analyzeCheckup(request, response, user) {
 
 async function createMedication(request, response, user) {
   assertCaregiver(user);
-  const elder = getBoundElder(user);
+  const elder = await getBoundElder(user);
   const body = await readJson(request);
   const medicineName = required(body.medicineName, "药品名称不能为空");
   const timeOfDay = required(body.timeOfDay, "用药时间不能为空");
@@ -250,24 +247,24 @@ async function createMedication(request, response, user) {
   const mealTiming = String(body.mealTiming || "").trim();
   const id = createId("med");
 
-  db.prepare(
+  await db.prepare(
     `INSERT INTO medication_schedules
      (id, elder_id, created_by, medicine_name, dose_note, meal_timing, time_of_day, repeat_rule, remind_elder, remind_caregiver, enabled, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, 'daily', 1, 1, 1, ?)`
   ).run(id, elder.id, user.id, medicineName, doseNote, mealTiming, timeOfDay, nowIso());
-  ensureTodayMedicationLogs(elder.id);
-  createAlert(elder.id, "medication", "吃药提醒已设置", `TechGuard 吃药提醒：${elder.displayName}每天 ${timeOfDay} 需要服用${medicineName}${doseNote ? `（${doseNote}）` : ""}。`);
+  await ensureTodayMedicationLogs(elder.id);
+  await createAlert(elder.id, "medication", "吃药提醒已设置", `TechGuard 吃药提醒：${elder.displayName}每天 ${timeOfDay} 需要服用${medicineName}${doseNote ? `（${doseNote}）` : ""}。`);
   await notifyElder(elder, "task_assigned", "新的吃药提醒", `${user.displayName}为您设置了吃药提醒：\n每天 ${timeOfDay} 服用${medicineName}${doseNote ? `（${doseNote}）` : ""}。`);
   sendJson(response, 200, { ok: true, id });
 }
 
 async function completeMedication(request, response, user, logId) {
-  const elder = getBoundElder(user);
+  const elder = await getBoundElder(user);
   const body = await readJson(request);
-  const log = db.prepare("SELECT * FROM medication_logs WHERE id = ? AND elder_id = ?").get(logId, elder.id);
+  const log = await db.prepare("SELECT * FROM medication_logs WHERE id = ? AND elder_id = ?").get(logId, elder.id);
   if (!log) return sendJson(response, 404, { ok: false, message: "未找到用药记录" });
-  db.prepare("UPDATE medication_logs SET status = 'done', completed_at = ?, note = ? WHERE id = ?").run(nowIso(), String(body.note || ""), logId);
-  const schedule = db.prepare("SELECT * FROM medication_schedules WHERE id = ?").get(log.schedule_id);
+  await db.prepare("UPDATE medication_logs SET status = 'done', completed_at = ?, note = ? WHERE id = ?").run(nowIso(), String(body.note || ""), logId);
+  const schedule = await db.prepare("SELECT * FROM medication_schedules WHERE id = ?").get(log.schedule_id);
   const caregiver = { id: defaultCaregiverId, role: "caregiver" };
   await notifyCaregiver(caregiver, "medication_completed", "吃药已确认", `${elder.displayName}已确认服用${schedule?.medicine_name || "药品"}（${schedule?.time_of_day || ""}）。`, { feishuCard: buildSimpleCard("✅ 吃药已确认", `${elder.displayName}已确认服用${schedule?.medicine_name || "药品"}。\n时间：${schedule?.time_of_day || ""}`) });
   sendJson(response, 200, { ok: true });
@@ -275,7 +272,7 @@ async function completeMedication(request, response, user, logId) {
 
 async function createTask(request, response, user) {
   assertCaregiver(user);
-  const elder = getBoundElder(user);
+  const elder = await getBoundElder(user);
   const body = await readJson(request);
   const title = required(body.title, "任务标题不能为空");
   const description = String(body.description || "").trim();
@@ -283,22 +280,22 @@ async function createTask(request, response, user) {
   const dueTime = String(body.dueTime || "09:00");
   const id = createId("task");
 
-  db.prepare(
+  await db.prepare(
     `INSERT INTO care_tasks
      (id, elder_id, created_by, title, description, due_date, due_time, repeat_rule, status, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, 'none', 'pending', ?)`
   ).run(id, elder.id, user.id, title, description, dueDate, dueTime, nowIso());
-  createAlert(elder.id, "task", "任务已安排", `TechGuard 任务提醒：${elder.displayName} ${dueDate} ${dueTime} 需要完成：${title}。`);
+  await createAlert(elder.id, "task", "任务已安排", `TechGuard 任务提醒：${elder.displayName} ${dueDate} ${dueTime} 需要完成：${title}。`);
   await notifyElder(elder, "task_assigned", "家人安排了新任务", `${user.displayName}给您安排了新任务：\n${title}${description ? `\n说明：${description}` : ""}\n时间：${dueDate} ${dueTime}`);
   sendJson(response, 200, { ok: true, id });
 }
 
 async function completeTask(request, response, user, taskId) {
-  const elder = getBoundElder(user);
+  const elder = await getBoundElder(user);
   const body = await readJson(request);
-  const task = db.prepare("SELECT * FROM care_tasks WHERE id = ? AND elder_id = ?").get(taskId, elder.id);
+  const task = await db.prepare("SELECT * FROM care_tasks WHERE id = ? AND elder_id = ?").get(taskId, elder.id);
   if (!task) return sendJson(response, 404, { ok: false, message: "未找到任务" });
-  db.prepare("UPDATE care_tasks SET status = 'done', completed_at = ?, completion_note = ? WHERE id = ?").run(nowIso(), String(body.note || ""), taskId);
+  await db.prepare("UPDATE care_tasks SET status = 'done', completed_at = ?, completion_note = ? WHERE id = ?").run(nowIso(), String(body.note || ""), taskId);
   const caregiver = { id: defaultCaregiverId, role: "caregiver" };
   await notifyCaregiver(caregiver, "task_completed", "任务已完成", `${elder.displayName}完成了任务：${task.title}。`, { feishuCard: buildSimpleCard("✅ 任务已完成", `${elder.displayName}完成了任务：${task.title}\n时间：${task.due_date} ${task.due_time}`) });
   sendJson(response, 200, { ok: true });
@@ -306,34 +303,34 @@ async function completeTask(request, response, user, taskId) {
 
 async function saveWeatherSettings(request, response, user) {
   assertCaregiver(user);
-  const elder = getBoundElder(user);
+  const elder = await getBoundElder(user);
   const body = await readJson(request);
   const city = required(body.city, "城市不能为空");
   const district = String(body.district || "").trim();
   const careTime = String(body.careTime || "07:30");
-  db.prepare(
+  await db.prepare(
     `INSERT INTO weather_settings (elder_id, city, district, care_time, updated_at)
      VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(elder_id) DO UPDATE SET city = excluded.city, district = excluded.district, care_time = excluded.care_time, updated_at = excluded.updated_at`
   ).run(elder.id, city, district, careTime, nowIso());
-  createAlert(elder.id, "weather", "天气地区已设置", `TechGuard 天气关怀：已设置${elder.displayName}所在地为${city}${district ? district : ""}。`);
+  await createAlert(elder.id, "weather", "天气地区已设置", `TechGuard 天气关怀：已设置${elder.displayName}所在地为${city}${district ? district : ""}。`);
   sendJson(response, 200, { ok: true });
 }
 
-function weatherCare(response, user) {
-  const elder = getBoundElder(user);
-  const weather = db.prepare("SELECT * FROM weather_settings WHERE elder_id = ?").get(elder.id) || null;
+async function weatherCare(response, user) {
+  const elder = await getBoundElder(user);
+  const weather = (await db.prepare("SELECT * FROM weather_settings WHERE elder_id = ?").get(elder.id)) || null;
   sendJson(response, 200, { ok: true, weather, care: buildWeatherCare(weather) });
 }
 
 async function fraudCheck(request, response, user) {
-  const elder = getBoundElder(user);
+  const elder = await getBoundElder(user);
   const body = await readJson(request);
   const text = required(body.text, "短信内容不能为空");
   const result = analyzeFraud(text);
   if (result.score >= 80) {
     const message = `${elder.displayName}收到疑似${result.type}短信，请尽快联系老人，提醒不要点链接、不要回验证码、不要转账。`;
-    createAlert(elder.id, "fraud", "高危短信提醒", message);
+    await createAlert(elder.id, "fraud", "高危短信提醒", message);
     await notifyCaregiver(
       { id: defaultCaregiverId, role: "caregiver" },
       "fraud_detected",
@@ -346,16 +343,16 @@ async function fraudCheck(request, response, user) {
 }
 
 async function travelPlan(request, response, user) {
-  const elder = getBoundElder(user);
+  const elder = await getBoundElder(user);
   const body = await readJson(request);
   const query = required(body.query, "出行需求不能为空");
   const destination = inferDestination(query);
-  const weather = db.prepare("SELECT * FROM weather_settings WHERE elder_id = ?").get(elder.id) || null;
+  const weather = (await db.prepare("SELECT * FROM weather_settings WHERE elder_id = ?").get(elder.id)) || null;
   const care = buildWeatherCare(weather);
   const aiPlan = await generateTravelAdvice({ elder, query, destination, weatherCare: care });
   const reply = aiPlan.reply_for_elder;
   const caregiverAlert = aiPlan.caregiver_alert;
-  createAlert(elder.id, "travel", "出行关注", caregiverAlert);
+  await createAlert(elder.id, "travel", "出行关注", caregiverAlert);
   await notifyCaregiver(
     { id: defaultCaregiverId, role: "caregiver" },
     "travel_planned",
@@ -376,7 +373,7 @@ async function saveFeishuConfig(request, response, user) {
   assertCaregiver(user);
   const body = await readJson(request);
   const webhook = String(body.webhook || "").trim();
-  db.prepare(
+  await db.prepare(
     `INSERT INTO notification_channels (id, owner_id, channel_type, config_json, enabled, updated_at)
      VALUES (?, ?, 'feishu', ?, 1, ?)
      ON CONFLICT(owner_id, channel_type) DO UPDATE SET config_json = excluded.config_json, enabled = 1, updated_at = excluded.updated_at`
@@ -392,9 +389,9 @@ async function feishuTest(response, user) {
 }
 
 async function contactCaregiver(response, user) {
-  const elder = getBoundElder(user);
+  const elder = await getBoundElder(user);
   const message = `TechGuard 求助提醒：${elder.displayName}点击了一键联系家属，请尽快查看是否需要帮助。`;
-  createAlert(elder.id, "help", "一键求助", message);
+  await createAlert(elder.id, "help", "一键求助", message);
   const caregiver = { id: defaultCaregiverId, role: "caregiver" };
   const result = await notifyCaregiver(caregiver, "help_requested", "一键求助", `${elder.displayName}点击了一键联系家属，请尽快查看是否需要帮助。`, { feishuCard: buildSimpleCard("🆘 一键求助", `${elder.displayName}点击了一键联系家属。\n请尽快查看是否需要帮助。`) });
   sendJson(response, 200, { ok: true, result });
@@ -409,7 +406,7 @@ async function legacyFeishuNotify(request, response) {
 async function savePushSubscription(request, response, user) {
   const body = await readJson(request);
   const id = createId("push");
-  db.prepare(
+  await db.prepare(
     `INSERT INTO push_subscriptions (id, user_id, endpoint, p256dh, auth, user_agent, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`
   ).run(id, user.id, String(body.endpoint || ""), String(body.p256dh || ""), String(body.auth || ""), String(body.userAgent || request.headers["user-agent"] || ""), nowIso());
@@ -423,10 +420,10 @@ async function scanReminders(request, response) {
   }
   const today = todayDate();
   const nowTime = currentTime();
-  const elders = db.prepare("SELECT * FROM users WHERE role = 'elder'").all();
+  const elders = await db.prepare("SELECT * FROM users WHERE role = 'elder'").all();
   for (const elder of elders) {
-    ensureTodayMedicationLogs(elder.id);
-    const dueLogs = db
+    await ensureTodayMedicationLogs(elder.id);
+    const dueLogs = await db
       .prepare(
         `SELECT ml.*, ms.medicine_name, ms.dose_note, ms.time_of_day
          FROM medication_logs ml JOIN medication_schedules ms ON ms.id = ml.schedule_id
@@ -434,10 +431,10 @@ async function scanReminders(request, response) {
       )
       .all(elder.id, today, nowTime);
     for (const log of dueLogs) {
-      const existing = db.prepare("SELECT id FROM alerts WHERE type = 'medication' AND ref_id = ?").get(log.id);
+      const existing = await db.prepare("SELECT id FROM alerts WHERE type = 'medication' AND ref_id = ?").get(log.id);
       if (!existing) {
         const message = `${elder.display_name} ${log.time_of_day} 的${log.medicine_name}还没有确认服用。`;
-        createAlert(elder.id, "medication", "吃药未确认", message, log.id);
+        await createAlert(elder.id, "medication", "吃药未确认", message, log.id);
         await notifyCaregiver(
           { id: defaultCaregiverId, role: "caregiver" },
           "medication_due",
@@ -451,8 +448,8 @@ async function scanReminders(request, response) {
   sendJson(response, 200, { ok: true, checkedAt: nowIso() });
 }
 
-function initDatabase() {
-  db.exec(`
+async function initDatabase() {
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       username TEXT NOT NULL UNIQUE,
@@ -585,21 +582,21 @@ function initDatabase() {
     );
   `);
 
-  seedUser(defaultCaregiverId, "caregiver", "demo1234", "家属账号", "caregiver");
-  seedUser(defaultElderId, "elder", "demo1234", "长辈账号", "elder");
-  const link = db.prepare("SELECT id FROM family_links WHERE caregiver_id = ? AND elder_id = ?").get(defaultCaregiverId, defaultElderId);
+  await seedUser(defaultCaregiverId, "caregiver", "demo1234", "家属账号", "caregiver");
+  await seedUser(defaultElderId, "elder", "demo1234", "长辈账号", "elder");
+  const link = await db.prepare("SELECT id FROM family_links WHERE caregiver_id = ? AND elder_id = ?").get(defaultCaregiverId, defaultElderId);
   if (!link) {
-    db.prepare("INSERT INTO family_links (id, caregiver_id, elder_id, relation) VALUES (?, ?, ?, ?)").run("link-demo-family", defaultCaregiverId, defaultElderId, "家属");
+    await db.prepare("INSERT INTO family_links (id, caregiver_id, elder_id, relation) VALUES (?, ?, ?, ?)").run("link-demo-family", defaultCaregiverId, defaultElderId, "家属");
   }
 }
 
-function seedUser(id, username, password, displayName, role) {
-  const existing = db.prepare("SELECT id FROM users WHERE username = ?").get(username);
+async function seedUser(id, username, password, displayName, role) {
+  const existing = await db.prepare("SELECT id FROM users WHERE username = ?").get(username);
   if (existing) {
-    db.prepare("UPDATE users SET display_name = ?, password_hash = ? WHERE id = ?").run(displayName, hashPassword(password), existing.id);
+    await db.prepare("UPDATE users SET display_name = ?, password_hash = ? WHERE id = ?").run(displayName, hashPassword(password), existing.id);
     return;
   }
-  db.prepare("INSERT INTO users (id, username, password_hash, display_name, role, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(
+  await db.prepare("INSERT INTO users (id, username, password_hash, display_name, role, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(
     id,
     username,
     hashPassword(password),
@@ -609,9 +606,9 @@ function seedUser(id, username, password, displayName, role) {
   );
 }
 
-function getBoundElder(user) {
+async function getBoundElder(user) {
   if (user.role === "elder") return user;
-  const row = db
+  const row = await db
     .prepare(
       `SELECT u.id, u.username, u.display_name, u.role
        FROM family_links fl JOIN users u ON u.id = fl.elder_id
@@ -619,36 +616,37 @@ function getBoundElder(user) {
        LIMIT 1`
     )
     .get(user.id);
+  if (!row) throw new Error("未找到绑定的长辈账号");
   return publicUser(row);
 }
 
-function ensureTodayMedicationLogs(elderId) {
+async function ensureTodayMedicationLogs(elderId) {
   const today = todayDate();
-  const schedules = db.prepare("SELECT * FROM medication_schedules WHERE elder_id = ? AND enabled = 1").all(elderId);
+  const schedules = await db.prepare("SELECT * FROM medication_schedules WHERE elder_id = ? AND enabled = 1").all(elderId);
   for (const schedule of schedules) {
     const id = `${schedule.id}-${today}`;
-    db.prepare("INSERT OR IGNORE INTO medication_logs (id, schedule_id, elder_id, due_date, status) VALUES (?, ?, ?, ?, 'pending')").run(id, schedule.id, elderId, today);
+    await db.prepare("INSERT OR IGNORE INTO medication_logs (id, schedule_id, elder_id, due_date, status) VALUES (?, ?, ?, ?, 'pending')").run(id, schedule.id, elderId, today);
   }
 }
 
-function buildDailyReport(elderId) {
+async function buildDailyReport(elderId) {
   const today = todayDate();
-  const meds = db.prepare("SELECT status, COUNT(*) as count FROM medication_logs WHERE elder_id = ? AND due_date = ? GROUP BY status").all(elderId, today);
-  const tasks = db
+  const meds = await db.prepare("SELECT status, COUNT(*) as count FROM medication_logs WHERE elder_id = ? AND due_date = ? GROUP BY status").all(elderId, today);
+  const tasks = await db
     .prepare("SELECT status, COUNT(*) as count FROM care_tasks WHERE elder_id = ? AND (due_date = ? OR (due_date < ? AND status = 'pending')) GROUP BY status")
     .all(elderId, today, today);
-  const bloodPressure = db.prepare("SELECT COUNT(*) as count FROM blood_pressure_logs WHERE elder_id = ? AND substr(measured_at, 1, 10) = ?").get(elderId, today);
+  const bloodPressure = await db.prepare("SELECT COUNT(*) as count FROM blood_pressure_logs WHERE elder_id = ? AND substr(measured_at, 1, 10) = ?").get(elderId, today);
   return { date: today, medications: meds, tasks, bloodPressure: bloodPressure?.count || 0 };
 }
 
-function createAlert(elderId, type, title, message, refId = null) {
+async function createAlert(elderId, type, title, message, refId = null) {
   const id = createId("alert");
-  db.prepare("INSERT INTO alerts (id, elder_id, type, title, message, status, ref_id, created_at) VALUES (?, ?, ?, ?, ?, 'new', ?, ?)").run(id, elderId, type, title, message, refId, nowIso());
+  await db.prepare("INSERT INTO alerts (id, elder_id, type, title, message, status, ref_id, created_at) VALUES (?, ?, ?, ?, ?, 'new', ?, ?)").run(id, elderId, type, title, message, refId, nowIso());
   return id;
 }
 
 async function sendFeishu(user, text) {
-  const row = db.prepare("SELECT config_json FROM notification_channels WHERE owner_id = ? AND channel_type = 'feishu' AND enabled = 1").get(user.role === "caregiver" ? user.id : defaultCaregiverId);
+  const row = await db.prepare("SELECT config_json FROM notification_channels WHERE owner_id = ? AND channel_type = 'feishu' AND enabled = 1").get(user.role === "caregiver" ? user.id : defaultCaregiverId);
   const configured = row ? JSON.parse(row.config_json).webhook : "";
   const webhook = configured || feishuWebhookUrl;
   return postFeishu(webhook, text);
@@ -705,28 +703,28 @@ function buildBloodPressureCard(elder, summary, bpText, note) {
   };
 }
 
-function getNotificationPreferences(userId) {
-  const row = db.prepare("SELECT * FROM notification_preferences WHERE user_id = ?").get(userId);
+async function getNotificationPreferences(userId) {
+  const row = await db.prepare("SELECT * FROM notification_preferences WHERE user_id = ?").get(userId);
   if (row) return row;
   const defaults = { user_id: userId, task_assigned: 1, task_completed: 1, medication_completed: 1, blood_pressure_recorded: 1, blood_pressure_abnormal: 1, help_requested: 1, feishu_enabled: 1, updated_at: nowIso() };
-  db.prepare("INSERT INTO notification_preferences (user_id, task_assigned, task_completed, medication_completed, blood_pressure_recorded, blood_pressure_abnormal, help_requested, feishu_enabled, updated_at) VALUES (?, 1, 1, 1, 1, 1, 1, 1, ?)").run(userId, defaults.updated_at);
+  await db.prepare("INSERT INTO notification_preferences (user_id, task_assigned, task_completed, medication_completed, blood_pressure_recorded, blood_pressure_abnormal, help_requested, feishu_enabled, updated_at) VALUES (?, 1, 1, 1, 1, 1, 1, 1, ?)").run(userId, defaults.updated_at);
   return defaults;
 }
 
-function createNotification(userId, type, title, body) {
+async function createNotification(userId, type, title, body) {
   const id = createId("notif");
-  db.prepare("INSERT INTO notifications (id, user_id, type, title, body, is_read, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)").run(id, userId, type, title, body, nowIso());
+  await db.prepare("INSERT INTO notifications (id, user_id, type, title, body, is_read, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)").run(id, userId, type, title, body, nowIso());
   return id;
 }
 
 async function notifyCaregiver(caregiver, type, title, body, options = {}) {
-  const prefs = getNotificationPreferences(caregiver.id);
+  const prefs = await getNotificationPreferences(caregiver.id);
   const prefKey = type;
   if (prefs[prefKey] === 0) return { ok: false, message: "通知已关闭" };
-  createNotification(caregiver.id, type, title, body);
+  await createNotification(caregiver.id, type, title, body);
   if (prefs.feishu_enabled === 0) return { ok: false, message: "飞书通知已关闭" };
   if (options.feishuCard) {
-    const row = db.prepare("SELECT config_json FROM notification_channels WHERE owner_id = ? AND channel_type = 'feishu' AND enabled = 1").get(caregiver.id);
+    const row = await db.prepare("SELECT config_json FROM notification_channels WHERE owner_id = ? AND channel_type = 'feishu' AND enabled = 1").get(caregiver.id);
     const configured = row ? JSON.parse(row.config_json).webhook : "";
     const webhook = configured || feishuWebhookUrl;
     return postFeishuCard(webhook, options.feishuCard);
@@ -735,39 +733,39 @@ async function notifyCaregiver(caregiver, type, title, body, options = {}) {
 }
 
 async function notifyElder(elder, type, title, body) {
-  const prefs = getNotificationPreferences(elder.id);
+  const prefs = await getNotificationPreferences(elder.id);
   const prefKey = type;
   if (prefs[prefKey] === 0) return { ok: false, message: "通知已关闭" };
-  createNotification(elder.id, type, title, body);
+  await createNotification(elder.id, type, title, body);
   return { ok: true };
 }
 
-function notificationList(response, user) {
-  const notifications = db.prepare("SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 50").all(user.id);
-  const unreadCount = db.prepare("SELECT COUNT(*) as count FROM notifications WHERE user_id = ? AND is_read = 0").get(user.id).count;
-  const prefs = getNotificationPreferences(user.id);
+async function notificationList(response, user) {
+  const notifications = await db.prepare("SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 50").all(user.id);
+  const unreadCount = (await db.prepare("SELECT COUNT(*) as count FROM notifications WHERE user_id = ? AND is_read = 0").get(user.id)).count;
+  const prefs = await getNotificationPreferences(user.id);
   sendJson(response, 200, { ok: true, notifications, unreadCount, preferences: prefs });
 }
 
 async function markNotificationRead(request, response, user) {
   const body = await readJsonSync(request);
   if (body.all) {
-    db.prepare("UPDATE notifications SET is_read = 1 WHERE user_id = ?").run(user.id);
+    await db.prepare("UPDATE notifications SET is_read = 1 WHERE user_id = ?").run(user.id);
   } else if (body.id) {
-    db.prepare("UPDATE notifications SET is_read = 1 WHERE id = ? AND user_id = ?").run(body.id, user.id);
+    await db.prepare("UPDATE notifications SET is_read = 1 WHERE id = ? AND user_id = ?").run(body.id, user.id);
   }
   sendJson(response, 200, { ok: true });
 }
 
 async function saveNotificationPreferences(request, response, user) {
   const body = await readJson(request);
-  const prefs = getNotificationPreferences(user.id);
+  const prefs = await getNotificationPreferences(user.id);
   const fields = ["task_assigned", "task_completed", "medication_completed", "blood_pressure_recorded", "blood_pressure_abnormal", "help_requested", "feishu_enabled"];
   const updates = {};
   for (const field of fields) {
     if (body[field] !== undefined) updates[field] = body[field] ? 1 : 0;
   }
-  db.prepare(
+  await db.prepare(
     `INSERT INTO notification_preferences (user_id, task_assigned, task_completed, medication_completed, blood_pressure_recorded, blood_pressure_abnormal, help_requested, feishu_enabled, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(user_id) DO UPDATE SET ${Object.keys(updates).length ? Object.keys(updates).map((k) => `${k} = excluded.${k}`).join(", ") + ", " : ""}updated_at = excluded.updated_at`
@@ -782,7 +780,7 @@ async function saveNotificationPreferences(request, response, user) {
     updates.feishu_enabled ?? prefs.feishu_enabled,
     nowIso()
   );
-  sendJson(response, 200, { ok: true, preferences: getNotificationPreferences(user.id) });
+  sendJson(response, 200, { ok: true, preferences: await getNotificationPreferences(user.id) });
 }
 
 function readJsonSync(request) {
