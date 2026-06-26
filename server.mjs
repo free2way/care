@@ -9,8 +9,13 @@ const root = process.cwd();
 const port = Number(process.env.PORT || 5173);
 const dbPath = process.env.SQLITE_PATH || join(root, "data", "techguard.db");
 const feishuWebhookUrl = process.env.FEISHU_WEBHOOK_URL || "";
+const feishuAppId = process.env.FEISHU_APP_ID || process.env.care_FEISHU_APP_ID || "";
+const feishuAppSecret = process.env.FEISHU_APP_SECRET || process.env.care_FEISHU_APP_SECRET || "";
+const feishuReceiveId = process.env.FEISHU_RECEIVE_ID || process.env.care_FEISHU_RECEIVE_ID || "";
+const feishuReceiveIdType = process.env.FEISHU_RECEIVE_ID_TYPE || process.env.care_FEISHU_RECEIVE_ID_TYPE || "chat_id";
 const openaiApiKey = process.env.OPENAI_API_KEY || "";
 const cronSecret = process.env.CRON_SECRET || "";
+let feishuTenantTokenCache = null;
 const defaultCaregiverId = "user-caregiver";
 const defaultElderId = "user-elder";
 
@@ -663,7 +668,8 @@ async function sendFeishu(user, text) {
   const row = await db.prepare("SELECT config_json FROM notification_channels WHERE owner_id = ? AND channel_type = 'feishu' AND enabled = 1").get(user.role === "caregiver" ? user.id : defaultCaregiverId);
   const configured = row ? JSON.parse(row.config_json).webhook : "";
   const webhook = configured || feishuWebhookUrl;
-  return postFeishu(webhook, text);
+  if (webhook) return postFeishu(webhook, text);
+  return postFeishuAppMessage("text", { text });
 }
 
 async function postFeishu(webhook, text) {
@@ -681,6 +687,14 @@ async function postFeishu(webhook, text) {
   }
 }
 
+async function sendFeishuCard(user, card) {
+  const row = await db.prepare("SELECT config_json FROM notification_channels WHERE owner_id = ? AND channel_type = 'feishu' AND enabled = 1").get(user.role === "caregiver" ? user.id : defaultCaregiverId);
+  const configured = row ? JSON.parse(row.config_json).webhook : "";
+  const webhook = configured || feishuWebhookUrl;
+  if (webhook) return postFeishuCard(webhook, card);
+  return postFeishuAppMessage("interactive", card);
+}
+
 async function postFeishuCard(webhook, card) {
   if (!webhook) return { ok: false, message: "FEISHU_WEBHOOK_URL is not configured" };
   try {
@@ -690,6 +704,56 @@ async function postFeishuCard(webhook, card) {
       body: JSON.stringify({ msg_type: "interactive", card }),
     });
     if (!feishuResponse.ok) return { ok: false, message: "Feishu rejected the notification" };
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, message: error.message };
+  }
+}
+
+async function getFeishuTenantAccessToken() {
+  if (!feishuAppId || !feishuAppSecret) return null;
+  if (feishuTenantTokenCache && feishuTenantTokenCache.expiresAt > Date.now() + 60_000) {
+    return feishuTenantTokenCache.token;
+  }
+
+  const tokenResponse = await fetch("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
+    method: "POST",
+    headers: { "Content-Type": "application/json; charset=utf-8" },
+    body: JSON.stringify({ app_id: feishuAppId, app_secret: feishuAppSecret }),
+  });
+  const data = await tokenResponse.json();
+  if (!tokenResponse.ok || data.code !== 0 || !data.tenant_access_token) {
+    return null;
+  }
+  feishuTenantTokenCache = {
+    token: data.tenant_access_token,
+    expiresAt: Date.now() + Math.max(60, Number(data.expire || 7200) - 60) * 1000,
+  };
+  return feishuTenantTokenCache.token;
+}
+
+async function postFeishuAppMessage(msgType, content) {
+  if (!feishuReceiveId) return { ok: false, message: "FEISHU_RECEIVE_ID is not configured" };
+  const token = await getFeishuTenantAccessToken();
+  if (!token) return { ok: false, message: "Feishu app credentials are not configured or invalid" };
+
+  try {
+    const feishuResponse = await fetch(`https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=${encodeURIComponent(feishuReceiveIdType)}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify({
+        receive_id: feishuReceiveId,
+        msg_type: msgType,
+        content: JSON.stringify(content),
+      }),
+    });
+    const data = await feishuResponse.json();
+    if (!feishuResponse.ok || data.code !== 0) {
+      return { ok: false, message: data.msg || "Feishu app rejected the notification", code: data.code };
+    }
     return { ok: true };
   } catch (error) {
     return { ok: false, message: error.message };
@@ -738,10 +802,7 @@ async function notifyCaregiver(caregiver, type, title, body, options = {}) {
   await createNotification(caregiver.id, type, title, body);
   if (prefs.feishu_enabled === 0) return { ok: false, message: "飞书通知已关闭" };
   if (options.feishuCard) {
-    const row = await db.prepare("SELECT config_json FROM notification_channels WHERE owner_id = ? AND channel_type = 'feishu' AND enabled = 1").get(caregiver.id);
-    const configured = row ? JSON.parse(row.config_json).webhook : "";
-    const webhook = configured || feishuWebhookUrl;
-    return postFeishuCard(webhook, options.feishuCard);
+    return sendFeishuCard(caregiver, options.feishuCard);
   }
   return sendFeishu(caregiver, `${title}\n${body}`);
 }
