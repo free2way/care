@@ -17,6 +17,7 @@ if (!tursoUrl || !tursoAuthToken) {
 const tables = [
   "users",
   "family_links",
+  "auth_sessions",
   "medication_schedules",
   "medication_logs",
   "care_tasks",
@@ -44,6 +45,12 @@ CREATE TABLE IF NOT EXISTS family_links (
   caregiver_id TEXT NOT NULL,
   elder_id TEXT NOT NULL,
   relation TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  token TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS medication_schedules (
   id TEXT PRIMARY KEY,

@@ -2,6 +2,7 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, normalize } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { createDatabase } from "./src/server/database.mjs";
 
 const root = process.cwd();
@@ -10,7 +11,6 @@ const dbPath = process.env.SQLITE_PATH || join(root, "data", "techguard.db");
 const feishuWebhookUrl = process.env.FEISHU_WEBHOOK_URL || "";
 const openaiApiKey = process.env.OPENAI_API_KEY || "";
 const cronSecret = process.env.CRON_SECRET || "";
-const sessions = new Map();
 const defaultCaregiverId = "user-caregiver";
 const defaultElderId = "user-elder";
 
@@ -26,7 +26,7 @@ const contentTypes = {
 const db = await createDatabase({ dbPath });
 await initDatabase();
 
-createServer(async (request, response) => {
+export async function appHandler(request, response) {
   try {
     const url = new URL(request.url, "http://127.0.0.1");
     if (url.pathname.startsWith("/api/")) {
@@ -44,11 +44,15 @@ createServer(async (request, response) => {
   } catch (error) {
     sendJson(response, 500, { ok: false, message: error.message });
   }
-}).listen(port, () => {
-  console.log(`TechGuard is running at http://127.0.0.1:${port}/`);
-  console.log(`Database provider: ${db.label}`);
-  console.log(feishuWebhookUrl ? "Feishu relay is enabled." : "Feishu relay is not configured.");
-});
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  createServer(appHandler).listen(port, () => {
+    console.log(`TechGuard is running at http://127.0.0.1:${port}/`);
+    console.log(`Database provider: ${db.label}`);
+    console.log(feishuWebhookUrl ? "Feishu relay is enabled." : "Feishu relay is not configured.");
+  });
+}
 
 async function handleApi(request, response, url) {
   const route = `${request.method} ${url.pathname}`;
@@ -102,19 +106,23 @@ async function login(request, response) {
   }
 
   const token = randomBytes(24).toString("hex");
-  sessions.set(token, user.id);
+  const expiresAt = new Date(Date.now() + 604_800_000).toISOString();
+  await db.prepare("INSERT OR REPLACE INTO auth_sessions (token, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)").run(token, user.id, expiresAt, nowIso());
   response.setHeader("Set-Cookie", `tg_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800`);
   sendJson(response, 200, { ok: true, user: publicUser(user) });
 }
 
-function logout(_request, response) {
+async function logout(request, response) {
+  const token = getCookie(request, "tg_session");
+  if (token) await db.prepare("DELETE FROM auth_sessions WHERE token = ?").run(token);
   response.setHeader("Set-Cookie", "tg_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
   sendJson(response, 200, { ok: true });
 }
 
 async function requireUser(request, response, handler) {
   const token = getCookie(request, "tg_session");
-  const userId = token ? sessions.get(token) : null;
+  const session = token ? await db.prepare("SELECT * FROM auth_sessions WHERE token = ? AND expires_at > ?").get(token, nowIso()) : null;
+  const userId = session?.user_id;
   if (!userId) {
     sendJson(response, 401, { ok: false, message: "请先登录" });
     return;
@@ -463,6 +471,12 @@ async function initDatabase() {
       caregiver_id TEXT NOT NULL,
       elder_id TEXT NOT NULL,
       relation TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS auth_sessions (
+      token TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS medication_schedules (
       id TEXT PRIMARY KEY,
