@@ -86,6 +86,12 @@ const els = {
   memberRelation: document.querySelector("#memberRelation"),
   memberRole: document.querySelector("#memberRole"),
   roleTable: document.querySelector("#roleTable"),
+  notifBell: document.querySelector("#notifBell"),
+  notifBadge: document.querySelector("#notifBadge"),
+  notifDropdown: document.querySelector("#notifDropdown"),
+  notifList: document.querySelector("#notifList"),
+  prefGrid: document.querySelector("#prefGrid"),
+  toastContainer: document.querySelector("#toastContainer"),
 };
 
 els.loginForm.addEventListener("submit", async (event) => {
@@ -320,7 +326,7 @@ document.querySelector("#planTravel").addEventListener("click", async () => {
 });
 
 document.querySelector("#saveMemory").addEventListener("click", () => {
-  els.memoryReply.textContent = "这部分已升级为吃药确认和任务完成记录。日常记录会在下一步接入 SQLite 明细表。";
+  els.memoryReply.textContent = "这部分已整理到今日吃药确认和任务完成记录里，家人可以在照护动态中查看。";
 });
 
 document.querySelector("#askMedication").addEventListener("click", () => {
@@ -331,7 +337,7 @@ document.querySelector("#askMedication").addEventListener("click", () => {
 });
 
 document.querySelector("#resetDemo").addEventListener("click", async () => {
-  logEvent("当前版本数据在 SQLite 中保存，重置请删除 data/techguard.db 后重启服务。");
+  logEvent("演示数据已保留，刷新页面后可以继续体验。");
 });
 
 async function loadDashboard() {
@@ -375,7 +381,7 @@ function renderDashboard(data) {
   renderCheckups(data.checkups || []);
   renderMetrics(data);
   renderMembers(data);
-  renderLogs(["已连接 SQLite 后台。"]);
+  renderLogs(["已连接照护服务。"]);
 }
 
 function renderLoggedOut() {
@@ -503,8 +509,8 @@ function renderMembers(data) {
 
 function renderReportRows(data) {
   const rows = [
-    ["吃药", `今日 ${data.medications.length} 项`, `${data.medications.filter((item) => item.status === "done").length} 项已完成`, "SQLite"],
-    ["任务", `今日 ${data.tasks.length} 项`, `${data.tasks.filter((item) => item.status === "done").length} 项已完成`, "SQLite"],
+    ["吃药", `今日 ${data.medications.length} 项`, `${data.medications.filter((item) => item.status === "done").length} 项已完成`, "提醒确认"],
+    ["任务", `今日 ${data.tasks.length} 项`, `${data.tasks.filter((item) => item.status === "done").length} 项已完成`, "家人安排"],
     ["血压", `累计 ${(data.bloodPressure || []).length} 次`, data.bloodPressureSummary?.label || "未记录", "健康档案"],
     ["体检", `累计 ${(data.checkups || []).length} 份`, data.checkups?.[0]?.summary || "未上传", "报告分析"],
     ["天气", data.weather?.city || "未设置", data.weatherCare?.text || "无", "天气关怀"],
@@ -613,7 +619,7 @@ function renderCheckups(items) {
       <article class="report-item">
         <strong>${escapeHtml(item.file_name || "体检报告")} · ${formatTime(item.created_at)}</strong>
         <span>${escapeHtml(item.summary)}</span>
-        <small>来源：${item.source === "openai" ? "图片分析" : "本地建议"} · ${escapeHtml(item.risk_level)}</small>
+        <small>分析方式：${item.source === "openai" ? "图片整理" : "基础建议"} · ${escapeHtml(item.risk_level)}</small>
       </article>`
     )
     .join("");
@@ -727,5 +733,156 @@ function todayDate() {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(new Date());
 }
 
+// ===== 通知中心 =====
+let lastUnreadCount = 0;
+
+async function loadNotifications() {
+  if (!els.notifBell) return;
+  try {
+    const { notifications, unreadCount, preferences } = await api("/api/notifications");
+    els.notifBell.classList.remove("is-hidden");
+    renderNotifications(notifications);
+    renderNotifBadge(unreadCount);
+    renderPreferences(preferences);
+    if (unreadCount > lastUnreadCount && lastUnreadCount !== 0) {
+      const latest = notifications[0];
+      if (latest) showToast(`${latest.title}：${latest.body}`, "info");
+    }
+    lastUnreadCount = unreadCount;
+  } catch {
+    els.notifBell.classList.add("is-hidden");
+  }
+}
+
+function renderNotifBadge(count) {
+  if (count > 0) {
+    els.notifBadge.textContent = count > 99 ? "99+" : String(count);
+    els.notifBadge.classList.remove("is-hidden");
+  } else {
+    els.notifBadge.classList.add("is-hidden");
+  }
+}
+
+function renderNotifications(notifications) {
+  if (!notifications?.length) {
+    els.notifList.innerHTML = '<p class="muted" style="padding:16px;text-align:center;">暂无通知。</p>';
+    return;
+  }
+  els.notifList.innerHTML = notifications
+    .map(
+      (item) => `
+      <article class="notif-item ${item.is_read ? "" : "is-unread"}" data-notif-id="${item.id}">
+        <strong>${escapeHtml(item.title)}</strong>
+        <p>${escapeHtml(item.body)}</p>
+        <time>${formatTime(item.created_at)}</time>
+      </article>`
+    )
+    .join("");
+}
+
+function renderPreferences(prefs) {
+  if (!prefs || !els.prefGrid) return;
+  els.prefGrid.querySelectorAll("input[data-pref]").forEach((input) => {
+    const key = input.dataset.pref;
+    input.checked = prefs[key] === 1 || prefs[key] === true;
+  });
+}
+
+if (els.notifBell) {
+  els.notifBell.addEventListener("click", (event) => {
+    event.stopPropagation();
+    els.notifDropdown.classList.toggle("is-hidden");
+    if (!els.notifDropdown.classList.contains("is-hidden")) {
+      markAllNotificationsRead();
+    }
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!els.notifDropdown.contains(event.target) && !els.notifBell.contains(event.target)) {
+      els.notifDropdown.classList.add("is-hidden");
+    }
+  });
+}
+
+if (els.notifList) {
+  els.notifList.addEventListener("click", async (event) => {
+    const item = event.target.closest("[data-notif-id]");
+    if (!item) return;
+    await api("/api/notifications/read", { method: "POST", body: { id: item.dataset.notifId } });
+    item.classList.remove("is-unread");
+    await loadNotifications();
+  });
+}
+
+const markAllReadBtn = document.querySelector("#markAllRead");
+if (markAllReadBtn) {
+  markAllReadBtn.addEventListener("click", markAllNotificationsRead);
+}
+
+async function markAllNotificationsRead() {
+  try {
+    await api("/api/notifications/read", { method: "POST", body: { all: true } });
+    await loadNotifications();
+  } catch {
+    // 静默处理
+  }
+}
+
+if (els.prefGrid) {
+  els.prefGrid.addEventListener("change", async (event) => {
+    const input = event.target.closest("input[data-pref]");
+    if (!input) return;
+    const prefs = {};
+    els.prefGrid.querySelectorAll("input[data-pref]").forEach((el) => {
+      prefs[el.dataset.pref] = el.checked ? 1 : 0;
+    });
+    try {
+      await api("/api/notifications/preferences", { method: "POST", body: prefs });
+      showToast("通知偏好已保存。", "success");
+    } catch (error) {
+      showToast(error.message, "error");
+    }
+  });
+}
+
+// ===== Toast 提示系统 =====
+function showToast(message, type = "info", duration = 4000) {
+  if (!els.toastContainer) return;
+  const toast = document.createElement("div");
+  toast.className = `toast toast-${type}`;
+  toast.textContent = message;
+  els.toastContainer.appendChild(toast);
+  setTimeout(() => {
+    toast.classList.add("is-leaving");
+    toast.addEventListener("animationend", () => toast.remove(), { once: true });
+  }, duration);
+}
+
 els.taskDate.value = todayDate();
 loadDashboard();
+loadNotifications();
+setInterval(loadNotifications, 30000);
+
+// Navigation scroll-spy: highlight the current section in the sidebar
+const navLinks = Array.from(document.querySelectorAll(".nav-list a[data-nav-target]"));
+const navSections = navLinks
+  .map((link) => document.querySelector(link.dataset.navTarget))
+  .filter(Boolean);
+
+if (navSections.length && "IntersectionObserver" in window) {
+  const setActive = (id) => {
+    navLinks.forEach((link) => {
+      link.classList.toggle("is-active", link.dataset.navTarget === `#${id}`);
+    });
+  };
+  const observer = new IntersectionObserver(
+    (entries) => {
+      const visible = entries
+        .filter((entry) => entry.isIntersecting)
+        .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+      if (visible) setActive(visible.target.id);
+    },
+    { rootMargin: "-20% 0px -60% 0px", threshold: [0, 0.25, 0.5, 1] }
+  );
+  navSections.forEach((section) => observer.observe(section));
+}
