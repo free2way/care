@@ -1,3 +1,7 @@
+import { Readable } from "node:stream";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 const riskRules = [
   { name: "出现陌生链接", score: 25, test: (text) => /(https?:\/\/|www\.|\.icu|\.top|\.xyz|\.click|链接|网址)/i.test(text) },
   { name: "要求提供或回复验证码", score: 30, test: (text) => /(验证码|校验码|动态码|短信码|回复.*码)/.test(text) },
@@ -28,4 +32,90 @@ assert(highRisk.reasons.length >= 3, "TC-001 expected at least 3 risk reasons");
 const normalNotice = analyzeFraud("今天下午社区有免费体检，请到居委会登记。");
 assert(normalNotice.score < 80, `TC-005 expected non-high risk, got ${normalNotice.score}`);
 
+process.env.SQLITE_PATH = join(tmpdir(), `techguard-smoke-${process.pid}-${Date.now()}.db`);
+process.env.FEISHU_WEBHOOK_URL = "";
+process.env.FEISHU_RECEIVE_ID = "";
+process.env.CRON_SECRET = "";
+
+const { appHandler } = await import("../server.mjs");
+
+try {
+  let cookie = "";
+
+  async function api(path, options = {}) {
+    const response = await callApp(path, {
+      method: options.method || "GET",
+      body: options.body,
+      cookie,
+    });
+    const setCookie = response.headers["set-cookie"];
+    if (setCookie) cookie = setCookie.split(";")[0];
+    const data = JSON.parse(response.body || "{}");
+    assert(response.statusCode >= 200 && response.statusCode < 300, `${path} failed: ${data.message || response.statusCode}`);
+    return data;
+  }
+
+  await api("/api/auth/login", { method: "POST", body: { username: "caregiver", password: "demo1234" } });
+  await api("/api/tasks", {
+    method: "POST",
+    body: {
+      title: "测试任务飞书提醒",
+      description: "用于确认到点后只提醒一次",
+      dueDate: todayDate(),
+      dueTime: "00:00",
+    },
+  });
+
+  const firstScan = await api("/api/cron/reminders");
+  assert(firstScan.taskRemindersSent === 1, `TC-010 expected one task reminder, got ${firstScan.taskRemindersSent}`);
+
+  const secondScan = await api("/api/cron/reminders");
+  assert(secondScan.taskRemindersSent === 0, `TC-011 expected no duplicate reminders, got ${secondScan.taskRemindersSent}`);
+
+  const notifications = await api("/api/notifications");
+  assert(
+    notifications.notifications.some((item) => item.type === "task_due" && /测试任务飞书提醒/.test(item.body)),
+    "TC-012 expected task_due notification"
+  );
+} finally {
+  // No server sockets are opened in this test.
+}
+
 console.log("TechGuard v0.1 smoke tests passed");
+
+function todayDate() {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(new Date());
+}
+
+async function callApp(path, { method = "GET", body = null, cookie = "" } = {}) {
+  const rawBody = body ? JSON.stringify(body) : "";
+  const request = Readable.from(rawBody ? [Buffer.from(rawBody)] : []);
+  request.method = method;
+  request.url = path;
+  request.headers = {
+    ...(rawBody ? { "content-type": "application/json" } : {}),
+    ...(cookie ? { cookie } : {}),
+  };
+
+  return await new Promise((resolve, reject) => {
+    const response = {
+      statusCode: 200,
+      headers: {},
+      body: "",
+      setHeader(name, value) {
+        this.headers[name.toLowerCase()] = value;
+      },
+      writeHead(statusCode, headers = {}) {
+        this.statusCode = statusCode;
+        for (const [name, value] of Object.entries(headers)) {
+          this.headers[name.toLowerCase()] = value;
+        }
+      },
+      end(chunk = "") {
+        this.body += chunk;
+        resolve(this);
+      },
+    };
+    Promise.resolve(appHandler(request, response)).catch(reject);
+  });
+}

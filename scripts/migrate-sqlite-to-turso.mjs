@@ -160,6 +160,7 @@ CREATE TABLE IF NOT EXISTS notifications (
 CREATE TABLE IF NOT EXISTS notification_preferences (
   user_id TEXT PRIMARY KEY,
   task_assigned INTEGER NOT NULL DEFAULT 1,
+  task_due INTEGER NOT NULL DEFAULT 1,
   task_completed INTEGER NOT NULL DEFAULT 1,
   medication_completed INTEGER NOT NULL DEFAULT 1,
   blood_pressure_recorded INTEGER NOT NULL DEFAULT 1,
@@ -174,6 +175,7 @@ const local = new DatabaseSync(localDbPath);
 const turso = createClient({ url: tursoUrl, authToken: tursoAuthToken });
 
 await runSchema();
+await ensureTursoColumn("notification_preferences", "task_due", "INTEGER NOT NULL DEFAULT 1");
 
 for (const table of tables) {
   const columns = local.prepare(`PRAGMA table_info(${table})`).all().map((item) => item.name);
@@ -208,6 +210,12 @@ async function runSchema() {
   for (const statement of statements) {
     await turso.execute(statement);
   }
+}
+
+async function ensureTursoColumn(table, column, definition) {
+  const result = await turso.execute(`PRAGMA table_info(${quoteIdent(table)})`);
+  if (result.rows.some((item) => item.name === column)) return;
+  await turso.execute(`ALTER TABLE ${quoteIdent(table)} ADD COLUMN ${quoteIdent(column)} ${definition}`);
 }
 
 function quoteIdent(value) {

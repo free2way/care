@@ -443,6 +443,8 @@ async function scanReminders(request, response) {
   const today = todayDate();
   const nowTime = currentTime();
   const elders = await db.prepare("SELECT * FROM users WHERE role = 'elder'").all();
+  let medicationRemindersSent = 0;
+  let taskRemindersSent = 0;
   for (const elder of elders) {
     await ensureTodayMedicationLogs(elder.id);
     const dueLogs = await db
@@ -464,10 +466,35 @@ async function scanReminders(request, response) {
           message,
           { feishuCard: buildSimpleCard("吃药未确认", message) }
         );
+        medicationRemindersSent += 1;
+      }
+    }
+
+    const dueTasks = await db
+      .prepare(
+        `SELECT *
+         FROM care_tasks
+         WHERE elder_id = ? AND due_date = ? AND status = 'pending' AND due_time <= ?
+         ORDER BY due_time ASC`
+      )
+      .all(elder.id, today, nowTime);
+    for (const task of dueTasks) {
+      const existing = await db.prepare("SELECT id FROM alerts WHERE type = 'task_due' AND ref_id = ?").get(task.id);
+      if (!existing) {
+        const message = `${elder.display_name} ${task.due_time} 需要完成：${task.title}${task.description ? `。说明：${task.description}` : ""}`;
+        await createAlert(elder.id, "task_due", "任务到点提醒", message, task.id);
+        await notifyCaregiver(
+          { id: task.created_by || defaultCaregiverId, role: "caregiver" },
+          "task_due",
+          "任务到点提醒",
+          message,
+          { feishuCard: buildSimpleCard("任务到点提醒", message) }
+        );
+        taskRemindersSent += 1;
       }
     }
   }
-  sendJson(response, 200, { ok: true, checkedAt: nowIso() });
+  sendJson(response, 200, { ok: true, checkedAt: nowIso(), medicationRemindersSent, taskRemindersSent });
 }
 
 async function initDatabase() {
@@ -600,6 +627,7 @@ async function initDatabase() {
     CREATE TABLE IF NOT EXISTS notification_preferences (
       user_id TEXT PRIMARY KEY,
       task_assigned INTEGER NOT NULL DEFAULT 1,
+      task_due INTEGER NOT NULL DEFAULT 1,
       task_completed INTEGER NOT NULL DEFAULT 1,
       medication_completed INTEGER NOT NULL DEFAULT 1,
       blood_pressure_recorded INTEGER NOT NULL DEFAULT 1,
@@ -610,12 +638,20 @@ async function initDatabase() {
     );
   `);
 
+  await ensureColumn("notification_preferences", "task_due", "INTEGER NOT NULL DEFAULT 1");
+
   await seedUser(defaultCaregiverId, "caregiver", "demo1234", "家属账号", "caregiver");
   await seedUser(defaultElderId, "elder", "demo1234", "长辈账号", "elder");
   const link = await db.prepare("SELECT id FROM family_links WHERE caregiver_id = ? AND elder_id = ?").get(defaultCaregiverId, defaultElderId);
   if (!link) {
     await db.prepare("INSERT INTO family_links (id, caregiver_id, elder_id, relation) VALUES (?, ?, ?, ?)").run("link-demo-family", defaultCaregiverId, defaultElderId, "家属");
   }
+}
+
+async function ensureColumn(table, column, definition) {
+  const columns = await db.prepare(`PRAGMA table_info(${table})`).all();
+  if (columns.some((item) => item.name === column)) return;
+  await db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
 async function seedUser(id, username, password, displayName, role) {
@@ -793,8 +829,8 @@ function buildBloodPressureCard(elder, summary, bpText, note) {
 async function getNotificationPreferences(userId) {
   const row = await db.prepare("SELECT * FROM notification_preferences WHERE user_id = ?").get(userId);
   if (row) return row;
-  const defaults = { user_id: userId, task_assigned: 1, task_completed: 1, medication_completed: 1, blood_pressure_recorded: 1, blood_pressure_abnormal: 1, help_requested: 1, feishu_enabled: 1, updated_at: nowIso() };
-  await db.prepare("INSERT INTO notification_preferences (user_id, task_assigned, task_completed, medication_completed, blood_pressure_recorded, blood_pressure_abnormal, help_requested, feishu_enabled, updated_at) VALUES (?, 1, 1, 1, 1, 1, 1, 1, ?)").run(userId, defaults.updated_at);
+  const defaults = { user_id: userId, task_assigned: 1, task_due: 1, task_completed: 1, medication_completed: 1, blood_pressure_recorded: 1, blood_pressure_abnormal: 1, help_requested: 1, feishu_enabled: 1, updated_at: nowIso() };
+  await db.prepare("INSERT INTO notification_preferences (user_id, task_assigned, task_due, task_completed, medication_completed, blood_pressure_recorded, blood_pressure_abnormal, help_requested, feishu_enabled, updated_at) VALUES (?, 1, 1, 1, 1, 1, 1, 1, 1, ?)").run(userId, defaults.updated_at);
   return defaults;
 }
 
@@ -844,18 +880,19 @@ async function markNotificationRead(request, response, user) {
 async function saveNotificationPreferences(request, response, user) {
   const body = await readJson(request);
   const prefs = await getNotificationPreferences(user.id);
-  const fields = ["task_assigned", "task_completed", "medication_completed", "blood_pressure_recorded", "blood_pressure_abnormal", "help_requested", "feishu_enabled"];
+  const fields = ["task_assigned", "task_due", "task_completed", "medication_completed", "blood_pressure_recorded", "blood_pressure_abnormal", "help_requested", "feishu_enabled"];
   const updates = {};
   for (const field of fields) {
     if (body[field] !== undefined) updates[field] = body[field] ? 1 : 0;
   }
   await db.prepare(
-    `INSERT INTO notification_preferences (user_id, task_assigned, task_completed, medication_completed, blood_pressure_recorded, blood_pressure_abnormal, help_requested, feishu_enabled, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO notification_preferences (user_id, task_assigned, task_due, task_completed, medication_completed, blood_pressure_recorded, blood_pressure_abnormal, help_requested, feishu_enabled, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(user_id) DO UPDATE SET ${Object.keys(updates).length ? Object.keys(updates).map((k) => `${k} = excluded.${k}`).join(", ") + ", " : ""}updated_at = excluded.updated_at`
   ).run(
     user.id,
     updates.task_assigned ?? prefs.task_assigned,
+    updates.task_due ?? prefs.task_due,
     updates.task_completed ?? prefs.task_completed,
     updates.medication_completed ?? prefs.medication_completed,
     updates.blood_pressure_recorded ?? prefs.blood_pressure_recorded,

@@ -11,5 +11,8 @@
     { "src": "/src/(.*)", "dest": "/src/$1" },
     { "src": "/sw.js", "dest": "/sw.js" },
     { "src": "/(.*)", "dest": "/index.html" }
+  ],
+  "crons": [
+    { "path": "/api/cron/reminders", "schedule": "*/5 * * * *" }
   ]
 }
