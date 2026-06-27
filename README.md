@@ -57,9 +57,9 @@ FEISHU_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/xxxx" PORT=5174
 
 线上定时提醒：
 
-- `vercel.json` 已配置 `/api/cron/reminders` 每 5 分钟扫描一次到点任务和未确认吃药记录。
+- `vercel.json` 已配置 `/api/cron/reminders` 每天扫描一次，以兼容 Vercel Hobby 计划。
 - 如果设置了 `CRON_SECRET`，Vercel Cron 会带上 `Authorization: Bearer $CRON_SECRET`，接口会用它校验来源。
-- 5 分钟级 Cron 需要 Vercel Pro 计划；Hobby 计划只能使用每天一次的 Cron，若需准时提醒可改用外部定时服务调用同一路径。
+- 如果需要 5 分钟级准时提醒，可以升级 Vercel Pro，或使用外部定时服务调用同一路径。
 
 OpenAI 出行和体检报告分析：
 
