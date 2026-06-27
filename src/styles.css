@@ -124,6 +124,23 @@ button {
   font-weight: 700;
 }
 
+.language-toggle {
+  min-height: 34px;
+  border: 1px solid rgba(15, 111, 99, 0.22);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.86);
+  color: var(--accent-strong);
+  padding: 0 14px;
+  font-size: 14px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.language-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
 .status-dot {
   width: 10px;
   height: 10px;
