@@ -2,7 +2,21 @@
 
 TechGuard 是一个面向独居长辈与家庭看护人员的 AI 多 Agent 看护应用。它把吃药提醒、日常任务、防骗识别、天气关怀、出行规划、血压记录、体检报告分析和亲属通知组织在同一个服务台里，让长辈端尽量简单，让家属端可以持续配置、查看和跟进。
 
-English introduction: [README_EN.md](README_EN.md)
+## English Introduction
+
+TechGuard Senior Care Console is a multi-agent care application for older adults living independently and the family members who support them. It provides two separated experiences: seniors get a simple daily workspace for reminders, fraud checks, health records, and travel help, while caregivers can configure medication schedules, tasks, weather care, travel plans, and Feishu group notifications.
+
+The highlight is its practical multi-agent workflow. A medication agent manages medicine reminders, a task agent tracks family assignments, a fraud-protection agent checks suspicious SMS messages, a health agent reviews blood pressure and checkup reports, a travel agent gives senior-friendly route advice, and a notification agent sends important events to the family care group. Together, these agents turn scattered care needs into clear, timely, and trackable actions.
+
+TechGuard aims to make technology warmer and easier for seniors. It helps reduce digital anxiety, improves family care coordination, and gives older adults more confidence when facing daily health, travel, and online safety situations.
+
+Full English documentation: [README_EN.md](README_EN.md)
+
+English app URL:
+
+```text
+/?lang=en
+```
 
 ## 核心能力
 
