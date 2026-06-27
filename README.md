@@ -18,6 +18,8 @@ English app URL:
 /?lang=en
 ```
 
+![TechGuard English homepage](docs/assets/techguard-english-home.png)
+
 ## 核心能力
 
 - 双角色入口：长辈和家属登录后看到不同界面，功能边界清晰。

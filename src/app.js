@@ -16,7 +16,7 @@ const i18nPairs = [
   ["未登录", "Not signed in"],
   ["切换", "Switch"],
   ["账号登录", "Sign in"],
-  ["家人长辈分开登录", "Separate access for family and seniors"],
+  ["家人长辈分开登录", "Family and senior sign-in"],
   ["家属负责设置吃药、任务和天气关怀，长辈登录后只看今天该做什么。", "Family members set medication, tasks, and weather care. Seniors only see what they need today."],
   ["登录名", "Username"],
   ["密码", "Password"],
