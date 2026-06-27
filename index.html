@@ -325,16 +325,20 @@
 
             <section class="feishu-panel">
               <div>
-                <h3>飞书提醒</h3>
-                <p class="muted">填写飞书群机器人地址后可以测试发送。正式使用时建议只在可信环境中保存地址，避免被他人看到。</p>
+                <h3>手动发送飞书提醒</h3>
+                <p class="muted">看护人员可以直接写一段提醒，发送到家人飞书群。机器人地址由后台环境变量管理，页面不再展示。</p>
               </div>
               <label class="field">
-                <span>飞书机器人地址</span>
-                <input id="feishuWebhook" type="url" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." />
+                <span>提醒内容</span>
+                <textarea id="feishuMessage" rows="4" placeholder="例如：奶奶今天 21:00 需要服用缬沙坦，麻烦家人留意一下。"></textarea>
               </label>
+              <div class="quick-message-row" aria-label="常用飞书提醒">
+                <button class="secondary-button" data-feishu-template="medication" type="button">吃药提醒</button>
+                <button class="secondary-button" data-feishu-template="travel" type="button">出行提醒</button>
+                <button class="secondary-button" data-feishu-template="health" type="button">健康提醒</button>
+              </div>
               <div class="button-row">
-                <button class="secondary-button" id="saveFeishu" type="button">保存地址</button>
-                <button class="primary-button" id="testFeishu" type="button">测试提醒</button>
+                <button class="primary-button" id="sendFeishuMessage" type="button">发送到飞书群</button>
               </div>
               <p class="send-status" id="sendStatus">尚未发送提醒。</p>
             </section>

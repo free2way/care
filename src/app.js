@@ -69,7 +69,8 @@ const els = {
   travelDateTime: document.querySelector("#travelDateTime"),
   travelCareNote: document.querySelector("#travelCareNote"),
   travelPlanList: document.querySelector("#travelPlanList"),
-  feishuWebhook: document.querySelector("#feishuWebhook"),
+  feishuMessage: document.querySelector("#feishuMessage"),
+  sendFeishuMessage: document.querySelector("#sendFeishuMessage"),
   sendStatus: document.querySelector("#sendStatus"),
   taskTitle: document.querySelector("#taskTitle"),
   taskDate: document.querySelector("#taskDate"),
@@ -234,15 +235,33 @@ document.querySelector("#saveWeather").addEventListener("click", async () => {
   }
 });
 
-document.querySelector("#saveFeishu").addEventListener("click", async () => {
-  await api("/api/feishu/config", { method: "POST", body: { webhook: els.feishuWebhook.value.trim() } });
-  updateSendStatus("飞书地址已保存。", "safe");
+document.querySelectorAll("[data-feishu-template]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const templates = {
+      medication: "奶奶今天 21:00 需要服用缬沙坦，麻烦家人留意一下。",
+      travel: "奶奶准备从四惠东去朝阳公园，请家人关注出发和到达时间。",
+      health: "奶奶刚记录了血压，请家人稍后看一下健康档案里的最新结果。",
+    };
+    els.feishuMessage.value = templates[button.dataset.feishuTemplate] || "";
+    updateSendStatus("已填入常用提醒，可以修改后发送。", "pending");
+  });
 });
 
-document.querySelector("#testFeishu").addEventListener("click", async () => {
-  const { result } = await api("/api/feishu/test", { method: "POST" });
-  updateSendStatus(result.ok ? "测试提醒已发送到飞书。" : `已生成本地提醒，飞书未发送：${result.message}`, result.ok ? "safe" : "warning");
-  await loadDashboard();
+els.sendFeishuMessage.addEventListener("click", async () => {
+  const message = els.feishuMessage.value.trim();
+  if (!message) {
+    updateSendStatus("请先填写要发送到飞书群的提醒内容。", "warning");
+    return;
+  }
+  try {
+    updateSendStatus("正在发送到飞书群...", "pending");
+    const { result } = await api("/api/feishu/send", { method: "POST", body: { message } });
+    updateSendStatus(result.ok ? "已发送到飞书群。" : `发送失败：${result.message}`, result.ok ? "safe" : "warning");
+    if (result.ok) els.feishuMessage.value = "";
+    await loadDashboard();
+  } catch (error) {
+    updateSendStatus(error.message, "warning");
+  }
 });
 
 document.querySelector("#saveBloodPressure").addEventListener("click", async () => {

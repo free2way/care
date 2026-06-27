@@ -77,6 +77,7 @@ async function handleApi(request, response, url) {
   if (route === "POST /api/checkups/analyze") return requireUser(request, response, (user) => analyzeCheckup(request, response, user));
   if (route === "POST /api/feishu/config") return requireUser(request, response, (user) => saveFeishuConfig(request, response, user));
   if (route === "POST /api/feishu/test") return requireUser(request, response, (user) => feishuTest(response, user));
+  if (route === "POST /api/feishu/send") return requireUser(request, response, (user) => feishuManualSend(request, response, user));
   if (route === "GET /api/notifications") return requireUser(request, response, (user) => notificationList(response, user));
   if (route === "POST /api/notifications/read") return requireUser(request, response, (user) => markNotificationRead(request, response, user));
   if (route === "POST /api/notifications/preferences") return requireUser(request, response, (user) => saveNotificationPreferences(request, response, user));
@@ -398,6 +399,14 @@ async function feishuTest(response, user) {
   assertCaregiver(user);
   const message = `TechGuard 测试提醒：${user.displayName} 的飞书看护群可以接收提醒。`;
   const result = await sendFeishu(user, message);
+  sendJson(response, 200, { ok: true, result });
+}
+
+async function feishuManualSend(request, response, user) {
+  assertCaregiver(user);
+  const body = await readJson(request);
+  const message = required(body.message, "请填写要发送到飞书群的提醒内容").slice(0, 1000);
+  const result = await sendFeishu(user, `【看护手动提醒】\n${message}\n\n发送人：${user.displayName}`);
   sendJson(response, 200, { ok: true, result });
 }
 

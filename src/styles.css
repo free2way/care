@@ -772,6 +772,21 @@ textarea:focus-visible {
   margin: 0;
 }
 
+.feishu-panel textarea {
+  min-height: 132px;
+}
+
+.quick-message-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.quick-message-row .secondary-button {
+  min-height: 42px;
+  padding-inline: 14px;
+}
+
 .send-status {
   margin: 0;
   border-radius: var(--radius);
