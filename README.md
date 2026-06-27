@@ -1,23 +1,4 @@
-# TechGuard 银发守护服务台
-
-## 中文版
-
-TechGuard 是一个面向独居长辈与家庭看护人员的 AI 多 Agent 看护应用。它把吃药提醒、日常任务、防骗识别、天气关怀、出行规划、血压记录、体检报告分析和亲属通知组织在同一个服务台里，让长辈端尽量简单，让家属端可以持续配置、查看和跟进。
-
-![TechGuard 中文首页](docs/assets/techguard-chinese-home.png)
-
-### 核心能力
-
-- 双角色入口：长辈和家属登录后看到不同界面，功能边界清晰。
-- 提醒 Agent：家属配置吃药、任务和出行安排，长辈端只需查看与确认。
-- 反诈 Agent：长辈可手动粘贴可疑短信，系统识别链接、验证码、冒充机构和资金风险。
-- 天气 Agent：按城市和区县生成适合长辈阅读的出门关怀。
-- 出行 Agent：根据长辈一句话需求生成少换乘、少走路、易理解的出行建议。
-- 健康 Agent：记录血压高压、低压、心率和备注，绘制趋势曲线；支持上传体检报告照片并生成健康管理建议。
-- 通知 Agent：高危短信、异常健康记录、出行关注、任务到点等事件会进入家属告警中心，并可接入飞书机器人。
-- 本地数据层：使用 SQLite 保存用户、提醒、任务、健康档案、告警和通知配置。
-
-## English Version
+# TechGuard Senior Care Console
 
 TechGuard Senior Care Console is a multi-agent care application for older adults living independently and the family members who support them. It provides two separated experiences: seniors get a simple daily workspace for reminders, fraud checks, health records, and travel help, while caregivers can configure medication schedules, tasks, weather care, travel plans, and Feishu group notifications.
 
