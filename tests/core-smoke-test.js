@@ -36,6 +36,9 @@ process.env.SQLITE_PATH = join(tmpdir(), `techguard-smoke-${process.pid}-${Date.
 process.env.FEISHU_WEBHOOK_URL = "";
 process.env.FEISHU_RECEIVE_ID = "";
 process.env.CRON_SECRET = "";
+process.env.AMAP_WEB_SERVICE_KEY = "";
+process.env.AMAP_API_KEY = "";
+process.env.AMAP_JSAPI_KEY = "";
 
 const { appHandler } = await import("../server.mjs");
 
@@ -91,6 +94,13 @@ try {
     notifications.notifications.some((item) => item.type === "weather_daily" && /今日天气提醒/.test(item.title)),
     "TC-015 expected weather_daily notification"
   );
+
+  const travel = await api("/api/travel/plan", {
+    method: "POST",
+    body: { query: "我想从四惠东去朝阳公园，怎么坐车最稳妥？" },
+  });
+  assert(/朝阳公园/.test(travel.plan.route_summary), "TC-016 expected a route to Chaoyang Park");
+  assert(travel.plan.weather_care, "TC-017 expected travel plan to include weather care text");
 } finally {
   // No server sockets are opened in this test.
 }
