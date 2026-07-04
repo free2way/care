@@ -56,6 +56,14 @@ try {
   }
 
   await api("/api/auth/login", { method: "POST", body: { username: "caregiver", password: "demo1234" } });
+  await api("/api/weather/settings", {
+    method: "POST",
+    body: {
+      city: "北京",
+      district: "海淀区",
+      careTime: "00:00",
+    },
+  });
   await api("/api/tasks", {
     method: "POST",
     body: {
@@ -68,14 +76,20 @@ try {
 
   const firstScan = await api("/api/cron/reminders");
   assert(firstScan.taskRemindersSent === 1, `TC-010 expected one task reminder, got ${firstScan.taskRemindersSent}`);
+  assert(firstScan.weatherRemindersSent === 1, `TC-013 expected one weather reminder, got ${firstScan.weatherRemindersSent}`);
 
   const secondScan = await api("/api/cron/reminders");
   assert(secondScan.taskRemindersSent === 0, `TC-011 expected no duplicate reminders, got ${secondScan.taskRemindersSent}`);
+  assert(secondScan.weatherRemindersSent === 0, `TC-014 expected no duplicate weather reminders, got ${secondScan.weatherRemindersSent}`);
 
   const notifications = await api("/api/notifications");
   assert(
     notifications.notifications.some((item) => item.type === "task_due" && /测试任务飞书提醒/.test(item.body)),
     "TC-012 expected task_due notification"
+  );
+  assert(
+    notifications.notifications.some((item) => item.type === "weather_daily" && /今日天气提醒/.test(item.title)),
+    "TC-015 expected weather_daily notification"
   );
 } finally {
   // No server sockets are opened in this test.
