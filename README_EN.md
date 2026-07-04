@@ -10,6 +10,7 @@ TechGuard is a multi-agent care application for older adults who live independen
 - **Fraud Protection Agent**: checks suspicious SMS text pasted by the senior and explains the risk in simple language.
 - **Weather and Travel Agent**: creates easy-to-understand travel advice and weather care messages.
 - **Daily Weather Reminder**: checks the configured city every morning at 08:00 Beijing time, then shows the weather care message in the app and sends it to the Feishu care group.
+- **AMap Travel Planning**: uses `AMAP_WEB_SERVICE_KEY` to geocode start/end places and return senior-friendly public transit routes.
 - **Health Agent**: records blood pressure, shows trends, and supports checkup report photo review.
 - **Notification Agent**: sends important events to the family notification center and the Feishu care group.
 

@@ -68,6 +68,12 @@ OpenAI 出行和体检报告分析：
 OPENAI_API_KEY="你的 OpenAI API Key" PORT=5174 node server.mjs
 ```
 
+AMap travel planning:
+
+```bash
+AMAP_WEB_SERVICE_KEY="your AMap Web Service Key" PORT=5174 node server.mjs
+```
+
 ## 开发检查
 
 ```bash

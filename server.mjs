@@ -14,6 +14,7 @@ const feishuAppSecret = process.env.FEISHU_APP_SECRET || process.env.care_FEISHU
 const feishuReceiveId = process.env.FEISHU_RECEIVE_ID || process.env.care_FEISHU_RECEIVE_ID || "";
 const feishuReceiveIdType = process.env.FEISHU_RECEIVE_ID_TYPE || process.env.care_FEISHU_RECEIVE_ID_TYPE || "chat_id";
 const openaiApiKey = process.env.OPENAI_API_KEY || "";
+const amapApiKey = process.env.AMAP_WEB_SERVICE_KEY || process.env.AMAP_API_KEY || process.env.AMAP_JSAPI_KEY || "";
 const cronSecret = process.env.CRON_SECRET || "";
 let feishuTenantTokenCache = null;
 const defaultCaregiverId = "user-caregiver";
@@ -361,10 +362,11 @@ async function travelPlan(request, response, user) {
   const elder = await getBoundElder(user);
   const body = await readJson(request);
   const query = required(body.query, "出行需求不能为空");
-  const destination = inferDestination(query);
   const weather = (await db.prepare("SELECT * FROM weather_settings WHERE elder_id = ?").get(elder.id)) || null;
+  const destination = inferDestination(query);
+  const locations = inferTravelLocations(query, destination, weather);
   const care = await buildWeatherCare(weather);
-  const aiPlan = await generateTravelAdvice({ elder, query, destination, weatherCare: care });
+  const aiPlan = await generateTravelAdvice({ elder, query, ...locations, weatherCare: care });
   const reply = aiPlan.reply_for_elder;
   const caregiverAlert = aiPlan.caregiver_alert;
   await createAlert(elder.id, "travel", "出行关注", caregiverAlert);
@@ -378,7 +380,7 @@ async function travelPlan(request, response, user) {
   sendJson(response, 200, {
     ok: true,
     plan: {
-      destination,
+      ...locations,
       ...aiPlan,
     },
   });
@@ -1072,7 +1074,31 @@ function inferDestination(query) {
   return "目的地";
 }
 
-async function generateTravelAdvice({ elder, query, destination, weatherCare }) {
+function inferTravelLocations(query, fallbackDestination, weather) {
+  const city = normalizeCity(weather?.city) || inferCityFromText(query) || "北京";
+  const pair = query.match(/从(.+?)(?:到|去|前往)(.+?)(?:[，。,.；;]|$)/);
+  const origin = cleanPlaceName(pair?.[1]) || cleanPlaceName(weather ? `${weather.city}${weather.district || ""}` : "") || "当前位置";
+  const destination = cleanPlaceName(pair?.[2]) || cleanPlaceName(fallbackDestination);
+  return { origin, destination, city };
+}
+
+function inferCityFromText(text) {
+  const match = text.match(/(北京|上海|广州|深圳|杭州|南京|苏州|成都|重庆|武汉|西安|天津|长沙|郑州|青岛|厦门|福州|沈阳|大连)/);
+  return match?.[1] || "";
+}
+
+function normalizeCity(city) {
+  return String(city || "").replace(/市$/, "").trim();
+}
+
+function cleanPlaceName(value) {
+  return String(value || "")
+    .replace(/^(我|俺|老人|奶奶|爷爷|想|要|准备|打算|明天|今天|后天|上午|下午|晚上|中午)+/, "")
+    .replace(/(一趟|怎么走|怎么坐车|路线|最稳妥|最安全|啊|呀|呢|吗|吧|。|，|,|\.)+$/g, "")
+    .trim();
+}
+
+async function generateTravelAdvice({ elder, query, origin, destination, city, weatherCare }) {
   const routeExample =
     /四惠东/.test(query) && /朝阳公园/.test(query)
       ? {
@@ -1081,19 +1107,23 @@ async function generateTravelAdvice({ elder, query, destination, weatherCare }) 
           route_summary: "四惠东 → 地铁1号线 → 大望路换乘14号线 → 朝阳公园站",
           risk_level: weatherCare.severe ? "medium" : "low",
           need_family_help: weatherCare.severe,
+          weather_care: weatherCare.text,
           source: "local-route-example",
         }
       : null;
   const fallback = {
-    reply_for_elder: `${elder.displayName}，建议您去${destination}时选择少换乘、少走路的路线。${weatherCare.text} 如果路上不确定，就先联系家属。`,
-    caregiver_alert: `TechGuard 出行提醒：${elder.displayName}正在查询去${destination}的路线，建议确认是否需要接送。`,
-    route_summary: `前往${destination}`,
+    reply_for_elder: `${elder.displayName}，建议您从${origin}去${destination}时选择少换乘、少走路的路线。${weatherCare.text} 如果路上不确定，就先联系家属。`,
+    caregiver_alert: `TechGuard 出行提醒：${elder.displayName}正在查询从${origin}去${destination}的路线，建议确认是否需要接送。`,
+    route_summary: `${origin} → ${destination}`,
     risk_level: weatherCare.severe ? "medium" : "low",
     need_family_help: weatherCare.severe || /医院|复查|夜|晚上/.test(query),
+    weather_care: weatherCare.text,
     source: "local-fallback",
   };
 
-  if (routeExample && !openaiApiKey) return routeExample;
+  const amapPlan = await planAmapTransitRoute({ elder, origin, destination, city, weatherCare });
+  if (amapPlan) return amapPlan;
+  if (routeExample) return routeExample;
   if (!openaiApiKey) return fallback;
 
   try {
@@ -1117,7 +1147,9 @@ async function generateTravelAdvice({ elder, query, destination, weatherCare }) 
             content: JSON.stringify({
               elderName: elder.displayName,
               query,
+              origin,
               destination,
+              city,
               weatherCare: weatherCare.text,
             }),
           },
@@ -1133,11 +1165,120 @@ async function generateTravelAdvice({ elder, query, destination, weatherCare }) 
       route_summary: parsed.route_summary || routeExample?.route_summary || fallback.route_summary,
       risk_level: parsed.risk_level || fallback.risk_level,
       need_family_help: Boolean(parsed.need_family_help ?? fallback.need_family_help),
+      weather_care: weatherCare.text,
       source: "openai",
     };
   } catch {
     return fallback;
   }
+}
+
+async function planAmapTransitRoute({ elder, origin, destination, city, weatherCare }) {
+  if (!amapApiKey || !origin || !destination || origin === "当前位置" || destination === "目的地") return null;
+  try {
+    const [originPoint, destinationPoint] = await Promise.all([
+      geocodeAmapPlace(origin, city),
+      geocodeAmapPlace(destination, city),
+    ]);
+    if (!originPoint || !destinationPoint) return null;
+    const params = new URLSearchParams({
+      key: amapApiKey,
+      origin: `${originPoint.lng},${originPoint.lat}`,
+      destination: `${destinationPoint.lng},${destinationPoint.lat}`,
+      city,
+      cityd: city,
+      strategy: "0",
+      extensions: "base",
+    });
+    const data = await fetchJsonWithTimeout(`https://restapi.amap.com/v3/direction/transit/integrated?${params}`, 6000);
+    if (data.status !== "1") return null;
+    const transit = chooseSeniorTransitPlan(data.route?.transits || []);
+    if (!transit) return null;
+    const routeSummary = buildTransitSummary(transit);
+    const duration = formatDuration(Number(transit.duration));
+    const distance = formatDistance(Number(transit.distance));
+    const walkDistance = formatDistance(Number(transit.walking_distance));
+    const transfers = countTransitTransfers(transit);
+    const costText = transit.cost ? `，票价约${transit.cost}元` : "";
+    const riskLevel = weatherCare.severe || Number(transit.walking_distance) > 800 || transfers > 1 ? "medium" : "low";
+    return {
+      reply_for_elder: `${elder.displayName}，建议您从${origin}去${destination}：${routeSummary}。全程约${duration}，距离约${distance}，步行约${walkDistance}${costText}。${weatherCare.text} 出门前把手机电量充足，路上不确定就先联系家属。`,
+      caregiver_alert: `TechGuard 出行提醒：${elder.displayName}计划从${origin}前往${destination}。高德建议：${routeSummary}。约${duration}，步行约${walkDistance}${costText}。`,
+      route_summary: routeSummary,
+      risk_level: riskLevel,
+      need_family_help: riskLevel === "medium",
+      source: "amap-transit",
+      weather_care: weatherCare.text,
+      route_metrics: {
+        duration_seconds: Number(transit.duration) || 0,
+        distance_meters: Number(transit.distance) || 0,
+        walking_meters: Number(transit.walking_distance) || 0,
+        transfers,
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function geocodeAmapPlace(place, city) {
+  const params = new URLSearchParams({
+    key: amapApiKey,
+    address: city && !place.includes(city) ? `${city}${place}` : place,
+    city,
+  });
+  const data = await fetchJsonWithTimeout(`https://restapi.amap.com/v3/geocode/geo?${params}`, 6000);
+  const item = data.status === "1" ? data.geocodes?.[0] : null;
+  if (!item?.location) return null;
+  const [lng, lat] = item.location.split(",");
+  return { lng, lat, formattedAddress: item.formatted_address || place };
+}
+
+function chooseSeniorTransitPlan(transits) {
+  return transits
+    .filter((item) => item && item.segments?.length)
+    .sort((a, b) => seniorRouteScore(a) - seniorRouteScore(b))[0] || null;
+}
+
+function seniorRouteScore(plan) {
+  return countTransitTransfers(plan) * 2000 + Number(plan.walking_distance || 0) + Number(plan.duration || 0) / 20;
+}
+
+function countTransitTransfers(plan) {
+  return Math.max(0, (plan.segments || []).filter((segment) => segment.bus?.buslines?.length || segment.railway?.name).length - 1);
+}
+
+function buildTransitSummary(plan) {
+  const parts = [];
+  for (const segment of plan.segments || []) {
+    const walkingDistance = Number(segment.walking?.distance || 0);
+    if (walkingDistance >= 80) parts.push(`步行约${formatDistance(walkingDistance)}`);
+    const busline = segment.bus?.buslines?.[0];
+    if (busline) {
+      const lineName = cleanBusLineName(busline.name);
+      const from = busline.departure_stop?.name || "上车站";
+      const to = busline.arrival_stop?.name || "下车站";
+      parts.push(`${lineName}（${from}上车，${to}下车）`);
+    }
+    if (segment.railway?.name) parts.push(`${segment.railway.name}`);
+  }
+  return parts.slice(0, 6).join(" → ") || "少换乘路线";
+}
+
+function cleanBusLineName(name) {
+  return String(name || "公交").split("(")[0].replace(/地铁(\d+)/, "地铁$1号线");
+}
+
+function formatDistance(meters) {
+  if (!Number.isFinite(meters) || meters <= 0) return "0米";
+  return meters >= 1000 ? `${(meters / 1000).toFixed(1)}公里` : `${Math.round(meters)}米`;
+}
+
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "时间暂缺";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}分钟`;
+  return `${Math.floor(minutes / 60)}小时${minutes % 60}分钟`;
 }
 
 function analyzeBloodPressure(logs) {

@@ -1,7 +1,7 @@
 const samples = {
   fraud: "【社保中心】通知：您的社保卡由于在异地异常消费5000元已被冻结，请立即点击链接 shb-gov.icu 或回复验证码解冻。",
   memory: "我今天早上八点半吃过降压药了。",
-  travel: "我要去医院复查，不知道怎么走。",
+  travel: "我想从四惠东去朝阳公园，怎么坐车最稳妥？",
 };
 
 let currentDashboard = null;
@@ -769,7 +769,7 @@ document.querySelector("#planTravel").addEventListener("click", async () => {
     return;
   }
   const { plan } = await api("/api/travel/plan", { method: "POST", body: { query } });
-  els.weatherTrace.textContent = plan.risk_level === "medium" ? "需要留意天气" : "天气平稳";
+  els.weatherTrace.textContent = plan.weather_care || currentDashboard?.weatherCare?.text || (plan.risk_level === "medium" ? "需要留意天气" : "天气平稳");
   els.routeTrace.textContent = plan.route_summary || `前往${plan.destination}`;
   els.travelReply.textContent = plan.reply_for_elder;
   await loadDashboard();
