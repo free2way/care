@@ -925,7 +925,9 @@ function renderWeather(weather, care) {
     els.weatherDistrict.value = weather.district || "";
     els.weatherCareTime.value = weather.care_time || "08:00";
   }
-  els.weatherCareText.textContent = care?.text || "设置地区后会生成适合长辈看的天气提醒。";
+  const weatherText = care?.text || "设置地区后会生成适合长辈看的天气提醒。";
+  els.weatherCareText.textContent = weatherText;
+  els.weatherTrace.textContent = weatherText;
 }
 
 function renderMetrics(data) {
