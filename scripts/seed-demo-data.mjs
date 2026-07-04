@@ -85,7 +85,7 @@ for (const elderId of ["user-elder", "user-demo-elder"]) {
   db.prepare(
     `INSERT INTO weather_settings (elder_id, city, district, care_time, updated_at)
      VALUES (?, ?, ?, ?, ?)`
-  ).run(elderId, "北京", "海淀区", "07:30", nowIso());
+  ).run(elderId, "北京", "海淀区", "08:00", nowIso());
 }
 
 // ============================================================

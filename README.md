@@ -58,6 +58,7 @@ FEISHU_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/xxxx" PORT=5174
 线上定时提醒：
 
 - `vercel.json` 已配置 `/api/cron/reminders` 每天扫描一次，以兼容 Vercel Hobby 计划。
+- The current schedule `0 0 * * *` runs in UTC, which is 08:00 in Beijing time. It checks medication, tasks, and daily weather care, then records web alerts and sends Feishu group notifications.
 - 如果设置了 `CRON_SECRET`，Vercel Cron 会带上 `Authorization: Bearer $CRON_SECRET`，接口会用它校验来源。
 - 如果需要 5 分钟级准时提醒，可以升级 Vercel Pro，或使用外部定时服务调用同一路径。
 

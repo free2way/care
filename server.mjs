@@ -159,6 +159,7 @@ async function dashboard(response, user) {
     .all(elder.id, today, today);
   const alerts = await db.prepare("SELECT * FROM alerts WHERE elder_id = ? ORDER BY created_at DESC LIMIT 20").all(elder.id);
   const weather = (await db.prepare("SELECT * FROM weather_settings WHERE elder_id = ?").get(elder.id)) || null;
+  const weatherCare = await buildWeatherCare(weather);
   const bloodPressure = await db.prepare("SELECT * FROM blood_pressure_logs WHERE elder_id = ? ORDER BY measured_at ASC LIMIT 60").all(elder.id);
   const checkups = await db.prepare("SELECT id, elder_id, uploaded_by, file_name, summary, risk_level, source, created_at FROM checkup_reports WHERE elder_id = ? ORDER BY created_at DESC LIMIT 8").all(elder.id);
   const report = await buildDailyReport(elder.id);
@@ -171,7 +172,7 @@ async function dashboard(response, user) {
     tasks,
     alerts,
     weather,
-    weatherCare: buildWeatherCare(weather),
+    weatherCare,
     bloodPressure,
     bloodPressureSummary: analyzeBloodPressure(bloodPressure),
     checkups,
@@ -321,7 +322,7 @@ async function saveWeatherSettings(request, response, user) {
   const body = await readJson(request);
   const city = required(body.city, "城市不能为空");
   const district = String(body.district || "").trim();
-  const careTime = String(body.careTime || "07:30");
+  const careTime = String(body.careTime || "08:00");
   await db.prepare(
     `INSERT INTO weather_settings (elder_id, city, district, care_time, updated_at)
      VALUES (?, ?, ?, ?, ?)
@@ -334,7 +335,7 @@ async function saveWeatherSettings(request, response, user) {
 async function weatherCare(response, user) {
   const elder = await getBoundElder(user);
   const weather = (await db.prepare("SELECT * FROM weather_settings WHERE elder_id = ?").get(elder.id)) || null;
-  sendJson(response, 200, { ok: true, weather, care: buildWeatherCare(weather) });
+  sendJson(response, 200, { ok: true, weather, care: await buildWeatherCare(weather) });
 }
 
 async function fraudCheck(request, response, user) {
@@ -362,7 +363,7 @@ async function travelPlan(request, response, user) {
   const query = required(body.query, "出行需求不能为空");
   const destination = inferDestination(query);
   const weather = (await db.prepare("SELECT * FROM weather_settings WHERE elder_id = ?").get(elder.id)) || null;
-  const care = buildWeatherCare(weather);
+  const care = await buildWeatherCare(weather);
   const aiPlan = await generateTravelAdvice({ elder, query, destination, weatherCare: care });
   const reply = aiPlan.reply_for_elder;
   const caregiverAlert = aiPlan.caregiver_alert;
@@ -445,6 +446,7 @@ async function scanReminders(request, response) {
   const elders = await db.prepare("SELECT * FROM users WHERE role = 'elder'").all();
   let medicationRemindersSent = 0;
   let taskRemindersSent = 0;
+  let weatherRemindersSent = 0;
   for (const elder of elders) {
     await ensureTodayMedicationLogs(elder.id);
     const dueLogs = await db
@@ -493,8 +495,27 @@ async function scanReminders(request, response) {
         taskRemindersSent += 1;
       }
     }
+
+    const weather = await db.prepare("SELECT * FROM weather_settings WHERE elder_id = ?").get(elder.id);
+    if (weather && nowTime >= (weather.care_time || "08:00")) {
+      const refId = `${elder.id}-${today}`;
+      const existing = await db.prepare("SELECT id FROM alerts WHERE type = 'weather_daily' AND ref_id = ?").get(refId);
+      if (!existing) {
+        const care = await buildWeatherCare(weather);
+        const message = `${elder.display_name}今日天气提醒：${care.text}`;
+        await createAlert(elder.id, "weather_daily", "今日天气提醒", message, refId);
+        await notifyCaregiver(
+          { id: defaultCaregiverId, role: "caregiver" },
+          "weather_daily",
+          "今日天气提醒",
+          message,
+          { feishuCard: buildSimpleCard("今日天气提醒", message) }
+        );
+        weatherRemindersSent += 1;
+      }
+    }
   }
-  sendJson(response, 200, { ok: true, checkedAt: nowIso(), medicationRemindersSent, taskRemindersSent });
+  sendJson(response, 200, { ok: true, checkedAt: nowIso(), medicationRemindersSent, taskRemindersSent, weatherRemindersSent });
 }
 
 async function initDatabase() {
@@ -945,15 +966,102 @@ function inferFraudType(text) {
   return "疑似电信网络诈骗";
 }
 
-function buildWeatherCare(weather) {
+async function buildWeatherCare(weather) {
   if (!weather) {
-    return { text: "还没有设置天气地区。让家属先设置城市后，我就能每天提醒天气。", severe: false };
+    return { text: "还没有设置天气地区。让家属先设置城市后，我就能每天提醒天气。", severe: false, source: "not-configured" };
   }
+  const live = await fetchWeatherNow(weather);
+  if (!live) return buildFallbackWeatherCare(weather);
+
+  const location = `${weather.city}${weather.district || ""}`;
+  const condition = weatherCodeLabel(live.weatherCode);
+  const tempText = Number.isFinite(live.temperature) ? `${Math.round(live.temperature)}℃` : "温度暂缺";
+  const apparentText = Number.isFinite(live.apparentTemperature) ? `体感${Math.round(live.apparentTemperature)}℃` : "";
+  const rainText = Number.isFinite(live.precipitation) && live.precipitation > 0 ? `，降水${live.precipitation}毫米` : "";
+  const windText = Number.isFinite(live.windSpeed) ? `，风速约${Math.round(live.windSpeed)}公里/小时` : "";
+  const severe =
+    live.weatherCode >= 51 ||
+    live.precipitation > 0 ||
+    live.temperature <= 5 ||
+    live.temperature >= 33 ||
+    live.windSpeed >= 28;
+  let advice = "出门前看一眼衣服、钥匙和手机，慢慢走，别着急。";
+  if (live.weatherCode >= 51 || live.precipitation > 0) advice = "出门记得带伞，地面湿滑时慢慢走。";
+  else if (live.temperature <= 5) advice = "今天比较冷，出门多穿一件厚外套。";
+  else if (live.temperature >= 33) advice = "今天比较热，尽量避开中午出门，记得喝水。";
+  else if (live.windSpeed >= 28) advice = "今天风有点大，出门扶稳一点，注意保暖。";
+
+  return {
+    text: `${location}今天${condition}，${tempText}${apparentText ? `，${apparentText}` : ""}${rainText}${windText}。${advice}`,
+    severe,
+    source: "open-meteo",
+  };
+}
+
+function buildFallbackWeatherCare(weather) {
   const location = `${weather.city}${weather.district || ""}`;
   const rainy = /上海|杭州|苏州|南京/.test(location);
   return rainy
-    ? { text: `${location}今天可能有雨，出门记得带伞，路上慢慢走。`, severe: true }
-    : { text: `${location}今天天气整体平稳，出门前看一眼衣服和钥匙。`, severe: false };
+    ? { text: `${location}今天可能有雨，出门记得带伞，路上慢慢走。`, severe: true, source: "local-fallback" }
+    : { text: `${location}今天天气整体平稳，出门前看一眼衣服和钥匙。`, severe: false, source: "local-fallback" };
+}
+
+async function fetchWeatherNow(weather) {
+  try {
+    const place = await geocodeWeatherLocation(weather);
+    if (!place) return null;
+    const params = new URLSearchParams({
+      latitude: String(place.latitude),
+      longitude: String(place.longitude),
+      current: "temperature_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m",
+      timezone: "Asia/Shanghai",
+      forecast_days: "1",
+    });
+    const data = await fetchJsonWithTimeout(`https://api.open-meteo.com/v1/forecast?${params}`, 4500);
+    return {
+      temperature: Number(data.current?.temperature_2m),
+      apparentTemperature: Number(data.current?.apparent_temperature),
+      precipitation: Number(data.current?.precipitation),
+      weatherCode: Number(data.current?.weather_code),
+      windSpeed: Number(data.current?.wind_speed_10m),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function geocodeWeatherLocation(weather) {
+  const candidates = [`${weather.city}${weather.district || ""}`, weather.city].filter(Boolean);
+  for (const name of candidates) {
+    const params = new URLSearchParams({ name, count: "1", language: "zh", format: "json" });
+    const data = await fetchJsonWithTimeout(`https://geocoding-api.open-meteo.com/v1/search?${params}`, 4500);
+    const item = data.results?.[0];
+    if (item?.latitude != null && item?.longitude != null) return item;
+  }
+  return null;
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) throw new Error(`Weather request failed: ${response.status}`);
+    return await response.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function weatherCodeLabel(code) {
+  if (code === 0) return "晴朗";
+  if ([1, 2, 3].includes(code)) return "多云";
+  if ([45, 48].includes(code)) return "有雾";
+  if (code >= 51 && code <= 67) return "有雨";
+  if (code >= 71 && code <= 77) return "有雪";
+  if (code >= 80 && code <= 82) return "有阵雨";
+  if (code >= 95 && code <= 99) return "有雷雨";
+  return "天气平稳";
 }
 
 function inferDestination(query) {

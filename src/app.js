@@ -656,7 +656,7 @@ document.querySelector("#saveWeather").addEventListener("click", async () => {
       body: {
         city: els.weatherCity.value.trim(),
         district: els.weatherDistrict.value.trim(),
-        careTime: els.weatherCareTime.value || "07:30",
+        careTime: els.weatherCareTime.value || "08:00",
       },
     });
     logEvent("天气关怀：地区已保存。");
@@ -923,7 +923,7 @@ function renderWeather(weather, care) {
   if (weather) {
     els.weatherCity.value = weather.city || "";
     els.weatherDistrict.value = weather.district || "";
-    els.weatherCareTime.value = weather.care_time || "07:30";
+    els.weatherCareTime.value = weather.care_time || "08:00";
   }
   els.weatherCareText.textContent = care?.text || "设置地区后会生成适合长辈看的天气提醒。";
 }
