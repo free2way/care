@@ -61,6 +61,15 @@ const i18nPairs = [
   ["短信粘贴识别", "Paste SMS to check"],
   ["填入示例", "Use sample"],
   ["复制短信后粘贴到这里", "Paste the suspicious SMS here"],
+  ["语音输入", "Voice input"],
+  ["语音输入短信内容", "Voice input for SMS content"],
+  ["语音输入血压备注", "Voice input for blood pressure note"],
+  ["语音输入生活记录", "Voice input for daily record"],
+  ["语音输入出行需求", "Voice input for travel request"],
+  ["点击后直接说话，识别内容会自动填入上面的文字框。", "Tap, speak, and the recognized text will be placed above."],
+  ["可以说“早饭后，刚散步回来”。", "You can say “after breakfast, just came back from a walk.”"],
+  ["可以直接说“我今天早上八点半吃过降压药了”。", "You can say “I took my blood pressure medicine at 8:30 this morning.”"],
+  ["说出想去哪里、什么时候出门，小护会整理成文字。", "Say where and when you want to go, and the assistant will turn it into text."],
   ["开始检测", "Check now"],
   ["清空", "Clear"],
   ["欺诈评分", "Fraud score"],
@@ -208,6 +217,32 @@ const i18nPairs = [
 
 const zhToEn = new Map(i18nPairs);
 const enToZh = new Map(i18nPairs.map(([zh, en]) => [en, zh]));
+const voiceCopies = {
+  zh: {
+    idle: "语音输入",
+    listening: "正在听",
+    starting: "正在打开麦克风，请开始说话。",
+    interim: (text) => `正在识别：${text}`,
+    done: "已经填入识别到的内容，可以再检查一下。",
+    unsupported: "当前浏览器不支持语音输入，可继续手工输入。安卓手机建议使用 Chrome。",
+    insecure: "语音输入需要 HTTPS 页面或本地调试环境。",
+    noSpeech: "刚才没有听清楚，您可以再点一次说话。",
+    denied: "麦克风权限没有打开，请在浏览器里允许麦克风后再试。",
+    error: "语音输入暂时不可用，请先手工输入。",
+  },
+  en: {
+    idle: "Voice input",
+    listening: "Listening",
+    starting: "Opening the microphone. Please start speaking.",
+    interim: (text) => `Recognizing: ${text}`,
+    done: "Recognized text has been added. Please check it once.",
+    unsupported: "Voice input is not supported in this browser. On Android, Chrome is recommended.",
+    insecure: "Voice input needs an HTTPS page or a local development page.",
+    noSpeech: "I did not hear that clearly. Please tap again and speak.",
+    denied: "Microphone permission is blocked. Please allow microphone access in the browser.",
+    error: "Voice input is temporarily unavailable. Please type for now.",
+  },
+};
 
 const copy = {
   zh: {
@@ -508,6 +543,7 @@ function applyLanguage() {
   if (els.languageToggle) els.languageToggle.textContent = activeCopy().languageButton;
   translateTextNodes();
   translateAttributes();
+  refreshVoiceButtons();
 }
 
 function setLanguage(nextLang) {
@@ -525,6 +561,141 @@ function setLanguage(nextLang) {
 els.languageToggle?.addEventListener("click", () => {
   setLanguage(currentLang === "en" ? "zh" : "en");
 });
+
+let activeRecognition = null;
+let activeVoiceButton = null;
+
+function getSpeechRecognition() {
+  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
+
+function getVoiceCopy() {
+  return voiceCopies[currentLang] || voiceCopies.zh;
+}
+
+function voiceStatusFor(button) {
+  return button.closest(".voice-input")?.querySelector(".voice-status");
+}
+
+function setVoiceState(button, message, tone = "normal") {
+  const status = voiceStatusFor(button);
+  if (status) {
+    status.textContent = message;
+    status.dataset.tone = tone;
+  }
+}
+
+function resetVoiceButton(button) {
+  if (!button) return;
+  button.classList.remove("is-listening");
+  button.textContent = getVoiceCopy().idle;
+  button.setAttribute("aria-pressed", "false");
+}
+
+function refreshVoiceButtons() {
+  document.querySelectorAll("[data-voice-target]").forEach((button) => {
+    if (!button.classList.contains("is-listening")) {
+      button.textContent = getVoiceCopy().idle;
+    }
+  });
+}
+
+function appendVoiceText(target, text) {
+  const transcript = String(text || "").trim();
+  if (!transcript) return;
+  const current = target.value.trim();
+  const needsSeparator = current && !/[，。！？,.!?\s]$/.test(current);
+  target.value = current ? `${current}${needsSeparator ? "，" : ""}${transcript}` : transcript;
+  target.dispatchEvent(new Event("input", { bubbles: true }));
+  target.focus();
+}
+
+function setupVoiceInputs() {
+  const buttons = document.querySelectorAll("[data-voice-target]");
+  if (!buttons.length) return;
+
+  const SpeechRecognition = getSpeechRecognition();
+  const insecure = !window.isSecureContext && !["localhost", "127.0.0.1"].includes(window.location.hostname);
+
+  buttons.forEach((button) => {
+    const target = document.querySelector(button.dataset.voiceTarget);
+    button.textContent = getVoiceCopy().idle;
+    button.setAttribute("aria-pressed", "false");
+
+    if (!target || !SpeechRecognition || insecure) {
+      button.disabled = true;
+      setVoiceState(button, insecure ? getVoiceCopy().insecure : getVoiceCopy().unsupported, "warning");
+      return;
+    }
+
+    button.addEventListener("click", () => {
+      const copyText = getVoiceCopy();
+      if (activeRecognition && activeVoiceButton === button) {
+        activeRecognition.stop();
+        return;
+      }
+      if (activeRecognition) {
+        activeRecognition.abort();
+        resetVoiceButton(activeVoiceButton);
+      }
+
+      const recognition = new SpeechRecognition();
+      activeRecognition = recognition;
+      activeVoiceButton = button;
+      let finalTranscript = "";
+      let interimTranscript = "";
+
+      recognition.lang = currentLang === "en" ? "en-US" : "zh-CN";
+      recognition.continuous = false;
+      recognition.interimResults = true;
+      recognition.maxAlternatives = 1;
+
+      button.classList.add("is-listening");
+      button.textContent = copyText.listening;
+      button.setAttribute("aria-pressed", "true");
+      setVoiceState(button, copyText.starting, "pending");
+
+      recognition.onresult = (event) => {
+        interimTranscript = "";
+        for (let index = event.resultIndex; index < event.results.length; index += 1) {
+          const transcript = event.results[index][0]?.transcript || "";
+          if (event.results[index].isFinal) finalTranscript += transcript;
+          else interimTranscript += transcript;
+        }
+        if (interimTranscript) setVoiceState(button, copyText.interim(interimTranscript), "pending");
+      };
+
+      recognition.onerror = (event) => {
+        const message = event.error === "not-allowed" || event.error === "service-not-allowed"
+          ? copyText.denied
+          : event.error === "no-speech"
+            ? copyText.noSpeech
+            : copyText.error;
+        setVoiceState(button, message, "warning");
+      };
+
+      recognition.onend = () => {
+        const text = finalTranscript || interimTranscript;
+        if (text) {
+          appendVoiceText(target, text);
+          setVoiceState(button, copyText.done, "safe");
+        }
+        resetVoiceButton(button);
+        activeRecognition = null;
+        activeVoiceButton = null;
+      };
+
+      try {
+        recognition.start();
+      } catch {
+        setVoiceState(button, copyText.error, "warning");
+        resetVoiceButton(button);
+        activeRecognition = null;
+        activeVoiceButton = null;
+      }
+    });
+  });
+}
 
 els.loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -1296,6 +1467,7 @@ function showToast(message, type = "info", duration = 4000) {
   }, duration);
 }
 
+setupVoiceInputs();
 applyLanguage();
 els.taskDate.value = todayDate();
 loadDashboard();
