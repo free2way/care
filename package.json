@@ -6,9 +6,11 @@
   "scripts": {
     "start": "node server.mjs",
     "check": "node --check server.mjs && node --check src/app.js && node tests/core-smoke-test.js",
-    "migrate:turso": "node scripts/migrate-sqlite-to-turso.mjs"
+    "migrate:turso": "node scripts/migrate-sqlite-to-turso.mjs",
+    "generate:icons": "node scripts/generate-icons.mjs"
   },
   "dependencies": {
-    "@libsql/client": "^0.15.15"
+    "@libsql/client": "^0.15.15",
+    "web-push": "^3.6.7"
   }
 }
