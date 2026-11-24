@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { rmSync } from "node:fs";
 import { Readable } from "node:stream";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,7 +49,7 @@ process.env.AMAP_WEB_SERVICE_KEY = "";
 process.env.AMAP_API_KEY = "";
 process.env.AMAP_JSAPI_KEY = "";
 
-const { appHandler, parseLifeEvent, medicationStockAlertDays, weatherGeocodeCandidates, buildFallbackWeatherCare } = await import("../server.mjs");
+const { appHandler, parseLifeEvent, medicationStockAlertDays, weatherGeocodeCandidates, buildFallbackWeatherCare, normalizeFeishuWebhook, shouldSeedDemoAccounts, isMedicationDueOnDate } = await import("../server.mjs");
 
 try {
   let cookie = "";
@@ -1337,6 +1338,283 @@ try {
 
 } finally {
   // No server sockets are opened in this test.
+  // ---- 审核改进回归测试（血压超 60 条窗口、飞书 Webhook SSRF 拦截、复诊摘要指标、防骗称呼、生产环境演示账号开关）----
+  {
+    // AUD-001：血压超过 60 条后必须返回「最新 60 条」且保持时间升序（不能卡死在最早 60 条）
+    const audDb = new DatabaseSync(smokeDbPath);
+    const audNow = new Date().toISOString();
+    const audHash = createHash("sha256").update("techguard:demo1234").digest("hex");
+    audDb.prepare("INSERT OR IGNORE INTO users (id, username, password_hash, display_name, role, created_at) VALUES (?, ?, ?, ?, 'caregiver', ?)").run("user-aud-care", "aud-care", audHash, "审核家属", audNow);
+    audDb.prepare("INSERT OR IGNORE INTO users (id, username, password_hash, display_name, role, created_at) VALUES (?, ?, ?, ?, 'elder', ?)").run("user-aud-elder", "aud-elder", audHash, "张爷爷", audNow);
+    audDb.prepare("INSERT OR IGNORE INTO family_links (id, caregiver_id, elder_id, relation) VALUES (?, ?, ?, ?)").run("link-aud", "user-aud-care", "user-aud-elder", "儿子");
+    for (let i = 1; i <= 65; i += 1) {
+      const day = String(((i - 1) % 28) + 1).padStart(2, "0");
+      const month = i <= 28 ? "01" : i <= 56 ? "02" : "03";
+      const measuredAt = `2026-${month}-${day}T08:${String(i % 60).padStart(2, "0")}`;
+      audDb.prepare(
+        "INSERT INTO blood_pressure_logs (id, elder_id, measured_by, systolic, diastolic, pulse, note, measured_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      ).run(`bp-aud-${i}`, "user-aud-elder", "user-aud-elder", 100 + i, 70, 72, `第${i}条`, measuredAt, audNow);
+    }
+    audDb.close();
+
+    const audLogin = await callApp("/api/auth/login", { method: "POST", body: { username: "aud-care", password: "demo1234" } });
+    assert(audLogin.statusCode === 200, "AUD-001 expected aud-care login to succeed");
+    const audCookie = audLogin.headers["set-cookie"].split(";")[0];
+
+    const bpRes = await callApp("/api/blood-pressure", { cookie: audCookie });
+    const bpData = JSON.parse(bpRes.body);
+    assert(bpData.bloodPressure.length === 60, `AUD-001 expected 60 recent readings, got ${bpData.bloodPressure.length}`);
+    assert(bpData.bloodPressure[0].systolic === 106, `AUD-001 oldest retained reading should be #6 (106), got ${bpData.bloodPressure[0].systolic}`);
+    assert(bpData.bloodPressure[59].systolic === 165, `AUD-001 newest reading should be #65 (165), got ${bpData.bloodPressure[59].systolic}`);
+    assert(bpData.summary.latest.systolic === 165, `AUD-001 summary.latest should reflect #65 (165), got ${bpData.summary.latest.systolic}`);
+
+    // AUD-002：飞书 Webhook 校验防 SSRF（拒绝内网/非飞书域名/非法路径，放行官方 Webhook 与空串清除）
+    for (const badWebhook of [
+      "http://127.0.0.1:8080/hook",
+      "http://169.254.169.254/latest/meta-data/",
+      "https://evil.example.com/open-apis/bot/v2/hook/12345678",
+      "https://open.feishu.cn/other/path",
+      "not-a-url",
+    ]) {
+      const res = await callApp("/api/feishu/config", { method: "POST", cookie: audCookie, body: { webhook: badWebhook } });
+      assert(res.statusCode === 400, `AUD-002 expected 400 for invalid webhook ${badWebhook}, got ${res.statusCode}`);
+    }
+    const okWebhookRes = await callApp("/api/feishu/config", {
+      method: "POST",
+      cookie: audCookie,
+      body: { webhook: "https://open.feishu.cn/open-apis/bot/v2/hook/abcdef12-3456-7890" },
+    });
+    assert(okWebhookRes.statusCode === 200, `AUD-002 expected 200 for valid feishu webhook, got ${okWebhookRes.statusCode}`);
+    assert(normalizeFeishuWebhook("") === "", "AUD-002 empty webhook should normalize to empty string");
+    const clearWebhookRes = await callApp("/api/feishu/config", { method: "POST", cookie: audCookie, body: { webhook: "" } });
+    assert(clearWebhookRes.statusCode === 200, "AUD-002 clearing webhook should return 200");
+
+    // AUD-003：复诊摘要包含结构化体检指标趋势
+    const indSaveRes = await callApp("/api/checkup-indicators", {
+      method: "POST",
+      cookie: audCookie,
+      body: { measuredDate: todayDate(), items: [{ name: "空腹血糖", value: 6.7, unit: "mmol/L" }] },
+    });
+    assert(indSaveRes.statusCode === 200, "AUD-003 expected checkup indicator save to succeed");
+    const vsRes = await callApp("/api/visit-summary?days=30", { cookie: audCookie });
+    const vsData = JSON.parse(vsRes.body);
+    assert(Array.isArray(vsData.indicators) && vsData.indicators.length === 1, "AUD-003 visit-summary should include structured indicators");
+    assert(vsData.indicators[0].name === "空腹血糖" && vsData.indicators[0].outOfRange === true, "AUD-003 indicator summary should reflect outOfRange");
+
+    // AUD-004：防骗回复使用长辈真实称呼，不再写死“奶奶”
+    const fraudRes = await callApp("/api/fraud/check", {
+      method: "POST",
+      cookie: audCookie,
+      body: { text: "【社保中心】您的社保卡异常冻结，请立即点击 https://bad.icu 并回复验证码转账 5000 元" },
+    });
+    const fraudData = JSON.parse(fraudRes.body);
+    assert(fraudData.result.reply_for_elder.startsWith("张爷爷，"), `AUD-004 expected elder name in fraud reply, got: ${fraudData.result.reply_for_elder}`);
+    assert(!fraudData.result.reply_for_elder.includes("奶奶"), "AUD-004 fraud reply must not hardcode 奶奶");
+
+    // AUD-005：生产环境默认关闭演示账号自动种入，除非显式 ENABLE_DEMO_SEED=1
+    assert(shouldSeedDemoAccounts({}) === true, "AUD-005 local dev should seed demo accounts");
+    assert(shouldSeedDemoAccounts({ NODE_ENV: "production" }) === false, "AUD-005 production should not seed demo accounts by default");
+    assert(shouldSeedDemoAccounts({ VERCEL: "1" }) === false, "AUD-005 Vercel should not seed demo accounts by default");
+    assert(shouldSeedDemoAccounts({ NODE_ENV: "production", ENABLE_DEMO_SEED: "1" }) === true, "AUD-005 explicit ENABLE_DEMO_SEED=1 should allow seeding");
+  }
+
+  // ---- 第二阶段功能回归测试（家庭自助注册、长辈免密登录、急救卡、静默未活跃告警、非每日用药、周期任务、截图防骗）----
+  {
+    // P2-001：家庭自助注册
+    const regRes = await callApp("/api/auth/register", {
+      method: "POST",
+      body: {
+        caregiverDisplayName: "林女士",
+        caregiverUsername: "lin_family",
+        caregiverPassword: "Password123!",
+        relation: "女儿",
+        elderDisplayName: "林爷爷",
+      },
+    });
+    assert(regRes.statusCode === 200, `P2-001 register expected 200, got ${regRes.statusCode}: ${regRes.body}`);
+    const regCookie = regRes.headers["set-cookie"].split(";")[0];
+    const regData = JSON.parse(regRes.body);
+    assert(regData.user.role === "caregiver" && regData.elder.displayName === "林爷爷", "P2-001 expected caregiver and elder created");
+
+    const dupRegRes = await callApp("/api/auth/register", {
+      method: "POST",
+      body: {
+        caregiverDisplayName: "林女士2",
+        caregiverUsername: "LIN_FAMILY",
+        caregiverPassword: "Password123!",
+        relation: "女儿",
+        elderDisplayName: "林奶奶",
+      },
+    });
+    assert(dupRegRes.statusCode === 400, `P2-001 duplicate username expected 400, got ${dupRegRes.statusCode}`);
+
+    // P2-002：新增照护长辈 + 生成长辈免密登录链接 + 一次性消费
+    const addElderRes = await callApp("/api/elders", {
+      method: "POST",
+      cookie: regCookie,
+      body: { displayName: "林奶奶", relation: "女儿" },
+    });
+    assert(addElderRes.statusCode === 200, `P2-002 add elder expected 200, got ${addElderRes.statusCode}`);
+
+    const linkRes = await callApp("/api/elder-login-link", { method: "POST", cookie: regCookie });
+    assert(linkRes.statusCode === 200, `P2-002 elder login link expected 200, got ${linkRes.statusCode}`);
+    const linkData = JSON.parse(linkRes.body);
+    assert(linkData.loginLink.token && linkData.loginLink.url.includes("?elder_login="), "P2-002 expected magic login URL");
+
+    const consumeRes = await callApp("/api/auth/elder-login", {
+      method: "POST",
+      body: { token: linkData.loginLink.token },
+    });
+    assert(consumeRes.statusCode === 200, `P2-002 consume magic link expected 200, got ${consumeRes.statusCode}`);
+    const elderMagicCookie = consumeRes.headers["set-cookie"].split(";")[0];
+    assert(JSON.parse(consumeRes.body).user.displayName === "林奶奶", "P2-002 expected elder session for 林奶奶");
+
+    const reuseRes = await callApp("/api/auth/elder-login", {
+      method: "POST",
+      body: { token: linkData.loginLink.token },
+    });
+    assert(reuseRes.statusCode === 400, `P2-002 reused magic link expected 400, got ${reuseRes.statusCode}`);
+
+    // P2-003：长辈健康急救卡与未活跃告警配置 + 透出到长辈看板和复诊摘要
+    const saveProfRes = await callApp("/api/elder-profile", {
+      method: "POST",
+      cookie: regCookie,
+      body: {
+        bloodType: "O 型",
+        allergies: "青霉素过敏",
+        chronicConditions: "高血压",
+        emergencyHospital: "协和医院",
+        doctorName: "李医生",
+        doctorPhone: "010-69156114",
+        inactivityAlertEnabled: true,
+        inactivityDeadline: "00:00",
+      },
+    });
+    assert(saveProfRes.statusCode === 200, `P2-003 save elder profile expected 200, got ${saveProfRes.statusCode}`);
+
+    const elderDashRes = await callApp("/api/dashboard", { cookie: elderMagicCookie });
+    const elderDash = JSON.parse(elderDashRes.body);
+    assert(elderDash.elderProfile.allergies === "青霉素过敏" && elderDash.elderProfile.bloodType === "O 型", "P2-003 elder dashboard should include emergency health card");
+
+    const vsRes2 = await callApp("/api/visit-summary?days=30", { cookie: regCookie });
+    assert(JSON.parse(vsRes2.body).elderProfile.chronicConditions === "高血压", "P2-003 visit-summary should include elderProfile");
+
+    // P2-004：静默未活跃主动告警（cron 首次触发，二次幂等不重复）
+    const cronInact1 = await callApp("/api/cron/reminders");
+    const cronInactData1 = JSON.parse(cronInact1.body);
+    assert(cronInactData1.inactivityRemindersSent >= 1, `P2-004 expected inactivity alert sent, got ${cronInact1.body}`);
+
+    const cronInact2 = await callApp("/api/cron/reminders");
+    const cronInactData2 = JSON.parse(cronInact2.body);
+    assert(cronInactData2.inactivityRemindersSent === 0, `P2-004 expected idempotent 0 on second run, got ${cronInact2.body}`);
+
+    // P2-005：非每日用药周期判定（隔日 / 每周固定日 / 疗程边界）
+    assert(isMedicationDueOnDate({ enabled: 1, repeat_rule: "alternate", start_date: "2026-10-01" }, "2026-10-01") === true, "P2-005 alternate day 0 due");
+    assert(isMedicationDueOnDate({ enabled: 1, repeat_rule: "alternate", start_date: "2026-10-01" }, "2026-10-02") === false, "P2-005 alternate day 1 not due");
+    assert(isMedicationDueOnDate({ enabled: 1, repeat_rule: "alternate", start_date: "2026-10-01" }, "2026-10-03") === true, "P2-005 alternate day 2 due");
+    // 2026-11-23 是周一 (1)，2026-11-24 是周二 (2)
+    assert(isMedicationDueOnDate({ enabled: 1, repeat_rule: "weekly", repeat_days: "1,3,5" }, "2026-11-23") === true, "P2-005 weekly Mon due");
+    assert(isMedicationDueOnDate({ enabled: 1, repeat_rule: "weekly", repeat_days: "1,3,5" }, "2026-11-24") === false, "P2-005 weekly Tue not due");
+    assert(isMedicationDueOnDate({ enabled: 1, repeat_rule: "daily", start_date: "2026-11-20", end_date: "2026-11-22" }, "2026-11-23") === false, "P2-005 past end_date not due");
+
+    const weeklyMedRes = await callApp("/api/medications", {
+      method: "POST",
+      cookie: regCookie,
+      body: { medicineName: "维生素D", timeOfDay: "09:00", repeatRule: "weekly", repeatDays: "1,4", startDate: "2026-11-01", endDate: "2026-12-31" },
+    });
+    assert(weeklyMedRes.statusCode === 200, `P2-005 create weekly med expected 200, got ${weeklyMedRes.statusCode}`);
+
+    // P2-006：周期任务完成后自动生成下一次待办（每周 +7 天）
+    const recTaskRes = await callApp("/api/tasks", {
+      method: "POST",
+      cookie: regCookie,
+      body: { title: "每周称体重", dueDate: "2026-11-24", dueTime: "08:30", repeatRule: "weekly" },
+    });
+    assert(recTaskRes.statusCode === 200, `P2-006 create recurring task expected 200, got ${recTaskRes.statusCode}`);
+    const recTaskId = JSON.parse(recTaskRes.body).id;
+    const compTaskRes = await callApp(`/api/tasks/${recTaskId}/complete`, { method: "POST", cookie: elderMagicCookie, body: {} });
+    assert(compTaskRes.statusCode === 200, `P2-006 complete recurring task expected 200, got ${compTaskRes.statusCode}`);
+    const nextTaskId = JSON.parse(compTaskRes.body).nextTaskId;
+    assert(Boolean(nextTaskId), "P2-006 completing weekly task should spawn next occurrence");
+    const compAgainRes = await callApp(`/api/tasks/${recTaskId}/complete`, { method: "POST", cookie: elderMagicCookie, body: {} });
+    assert(JSON.parse(compAgainRes.body).nextTaskId === null, "P2-006 completing same task twice should not spawn duplicate");
+
+    // P2-007：截图防骗识别（无 OpenAI Key 时诚实降级并校验图片格式）
+    const badImgFraud = await callApp("/api/fraud/check", {
+      method: "POST",
+      cookie: elderMagicCookie,
+      body: { imageData: "data:text/plain;base64,aGVsbG8=" },
+    });
+    assert(badImgFraud.statusCode === 400, `P2-007 invalid image format expected 400, got ${badImgFraud.statusCode}`);
+
+    const tinyPng = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    const okImgFraud = await callApp("/api/fraud/check", {
+      method: "POST",
+      cookie: elderMagicCookie,
+      body: { imageData: tinyPng },
+    });
+    assert(okImgFraud.statusCode === 200, `P2-007 valid image fraud check expected 200, got ${okImgFraud.statusCode}`);
+    const imgFraudData = JSON.parse(okImgFraud.body);
+    assert(imgFraudData.result.source === "local-fallback" && imgFraudData.result.reply_for_elder.includes("林奶奶"), "P2-007 expected honest fallback with elder name");
+
+    // ---- 第三阶段回归测试（体检图片落盘/存储抽象 + 家庭隔离读取 + 多通道企微/钉钉 Webhook 校验）----
+    // P3-001：体检报告上传不再把 base64 塞进数据库，改为轻量 file:// 引用，且支持鉴权+跨家庭隔离读取
+    const chkUploadRes = await callApp("/api/checkups/analyze", {
+      method: "POST",
+      cookie: regCookie,
+      body: { imageData: tinyPng, fileName: "p3-test.png" },
+    });
+    assert(chkUploadRes.statusCode === 200, `P3-001 checkup upload expected 200, got ${chkUploadRes.statusCode}`);
+    const chkReport = JSON.parse(chkUploadRes.body).report;
+    assert(chkReport.storageBackend === "local-fs" && chkReport.imageUrl === `/api/checkups/${chkReport.id}/image`, "P3-001 expected local-fs storage ref");
+    const chkCheckDb = new DatabaseSync(smokeDbPath);
+    const storedRow = chkCheckDb.prepare("SELECT image_data FROM checkup_reports WHERE id = ?").get(chkReport.id);
+    chkCheckDb.close();
+    assert(storedRow.image_data.startsWith("file://checkups/"), `P3-001 DB should store file:// ref instead of base64, got: ${storedRow.image_data.slice(0, 40)}`);
+
+    const imgGetRes = await callApp(`/api/checkups/${chkReport.id}/image`, { cookie: regCookie });
+    assert(imgGetRes.statusCode === 200 && imgGetRes.headers["content-type"] === "image/png", `P3-001 expected 200 image/png, got ${imgGetRes.statusCode}`);
+    // 跨家庭隔离：其他家属无权读取林奶奶的体检原图
+    const otherCareLogin = await callApp("/api/auth/login", { method: "POST", body: { username: "caregiver", password: "demo1234" } });
+    const otherCareCookie = otherCareLogin.headers["set-cookie"].split(";")[0];
+    const otherImgGetRes = await callApp(`/api/checkups/${chkReport.id}/image`, { cookie: otherCareCookie });
+    assert(otherImgGetRes.statusCode === 404, `P3-001 cross-family image read expected 404, got ${otherImgGetRes.statusCode}`);
+    // 清理测试落盘文件
+    rmSync(join(process.cwd(), "data", "uploads", "checkups", `${chkReport.id}.png`), { force: true });
+
+    // P3-002：多通道通知（企业微信 / 钉钉）SSRF 白名单校验、脱敏展示与清空
+    for (const bad of [
+      { channelType: "wecom", webhook: "http://127.0.0.1/cgi-bin/webhook/send?key=12345678" },
+      { channelType: "wecom", webhook: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send" },
+      { channelType: "dingtalk", webhook: "https://evil.example/robot/send?access_token=1234567890" },
+      { channelType: "unknown", webhook: "https://example.com/hook" },
+    ]) {
+      const r = await callApp("/api/channels", { method: "POST", cookie: regCookie, body: bad });
+      assert(r.statusCode === 400, `P3-002 invalid channel ${bad.channelType} expected 400, got ${r.statusCode}`);
+    }
+
+    const saveWecom = await callApp("/api/channels", {
+      method: "POST",
+      cookie: regCookie,
+      body: { channelType: "wecom", webhook: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key-987654321" },
+    });
+    assert(saveWecom.statusCode === 200, `P3-002 valid wecom expected 200, got ${saveWecom.statusCode}`);
+
+    const saveDing = await callApp("/api/channels", {
+      method: "POST",
+      cookie: regCookie,
+      body: { channelType: "dingtalk", webhook: "https://oapi.dingtalk.com/robot/send?access_token=ding-token-abcdef123456" },
+    });
+    assert(saveDing.statusCode === 200, `P3-002 valid dingtalk expected 200, got ${saveDing.statusCode}`);
+
+    const listChanRes = await callApp("/api/channels", { cookie: regCookie });
+    const listChanData = JSON.parse(listChanRes.body);
+    const wecomItem = listChanData.channels.find((c) => c.channelType === "wecom");
+    assert(wecomItem.configured === true && !wecomItem.maskedWebhook.includes("secret-key-987654321"), "P3-002 wecom webhook should be masked");
+
+    const clearWecom = await callApp("/api/channels", { method: "POST", cookie: regCookie, body: { channelType: "wecom", webhook: "" } });
+    assert(clearWecom.statusCode === 200 && JSON.parse(clearWecom.body).configured === false, "P3-002 clearing wecom should disable it");
+  }
 }
 
 console.log("TechGuard v0.1 smoke tests passed");

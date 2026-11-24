@@ -5,6 +5,33 @@ import { randomBytes, createHash, scryptSync, timingSafeEqual } from "node:crypt
 import { fileURLToPath } from "node:url";
 import webpush from "web-push";
 import { createDatabase } from "./src/server/database.mjs";
+import { readStoredCheckupImage, storeCheckupImage } from "./src/server/storage.mjs";
+import {
+  SUPPORTED_WEBHOOK_CHANNELS,
+  dispatchUrgentSmsGateway,
+  maskWebhook,
+  normalizeChannelWebhook,
+  postWebhookChannel,
+} from "./src/server/channels.mjs";
+import {
+  addDaysToIsoDate,
+  analyzeBloodPressure,
+  analyzeFraud,
+  buildFallbackWeatherCare,
+  isAbnormalBloodPressure,
+  isMedicationDueOnDate,
+  parseLifeEvent,
+  weatherCodeLabel,
+  weatherGeocodeCandidates,
+} from "./src/server/domain-rules.mjs";
+
+export {
+  buildFallbackWeatherCare,
+  isMedicationDueOnDate,
+  normalizeChannelWebhook,
+  parseLifeEvent,
+  weatherGeocodeCandidates,
+};
 
 const root = process.cwd();
 const port = Number(process.env.PORT || 5173);
@@ -113,13 +140,21 @@ async function handleApi(request, response, url) {
 
   if (route === "POST /api/auth/login") return login(request, response);
   if (route === "POST /api/auth/logout") return logout(request, response);
+  if (route === "POST /api/auth/register") return registerFamily(request, response);
+  if (route === "POST /api/auth/elder-login") return consumeElderLoginLink(request, response);
   if (route === "GET /api/me") return requireUser(request, response, (user) => sendJson(response, 200, { ok: true, user }));
   // 保存联系电话（长辈端「一键联系家人」在飞书不可用时的兜底拨号数据）
   if (route === "POST /api/profile") return requireUser(request, response, (user) => saveProfile(request, response, user));
+  // 长辈健康急救卡 + 静默未活跃告警设置
+  if (route === "GET /api/elder-profile") return requireUser(request, response, (user) => getElderProfileHandler(response, user));
+  if (route === "POST /api/elder-profile") return requireUser(request, response, (user) => saveElderProfile(request, response, user));
   // 当前用户可见的长辈列表：家属拿到全部绑定的长辈，长辈只拿到自己
   if (route === "GET /api/elders") return requireUser(request, response, (user) => eldersList(response, user));
+  if (route === "POST /api/elders") return requireUser(request, response, (user) => createElder(request, response, user));
   // 切换当前照护的长辈：写入 users.active_elder_id，后续接口都跟着 getBoundElder 走
   if (route === "POST /api/elders/switch") return requireUser(request, response, (user) => switchElder(request, response, user));
+  // 长辈免密绑定链接（24 小时有效、一次性使用、登录后 90 天免密）
+  if (route === "POST /api/elder-login-link") return requireUser(request, response, (user) => createElderLoginLink(request, response, user));
   if (route === "GET /api/dashboard") return requireUser(request, response, (user) => dashboard(response, user));
   // 复诊摘要：把用药计划 / 血压 / 漏服 / 身体不适 / 体检报告聚合成一页，供家属带老人复诊时交给医生看。
   // 需要读取 ?days= 时间窗口，所以把已解析的 url 一并传进去。
@@ -146,6 +181,10 @@ async function handleApi(request, response, url) {
   if (route === "POST /api/feishu/config") return requireUser(request, response, (user) => saveFeishuConfig(request, response, user));
   if (route === "POST /api/feishu/test") return requireUser(request, response, (user) => feishuTest(response, user));
   if (route === "POST /api/feishu/send") return requireUser(request, response, (user) => feishuManualSend(request, response, user));
+  // 多通道通知配置：支持飞书 / 企业微信 / 钉钉群机器人
+  if (route === "GET /api/channels") return requireUser(request, response, (user) => listNotificationChannels(response, user));
+  if (route === "POST /api/channels") return requireUser(request, response, (user) => saveNotificationChannel(request, response, user));
+  if (route === "POST /api/channels/test") return requireUser(request, response, (user) => testNotificationChannel(request, response, user));
   if (route === "GET /api/notifications") return requireUser(request, response, (user) => notificationList(response, user));
   if (route === "POST /api/notifications/read") return requireUser(request, response, (user) => markNotificationRead(request, response, user));
   if (route === "POST /api/notifications/preferences") return requireUser(request, response, (user) => saveNotificationPreferences(request, response, user));
@@ -216,6 +255,12 @@ async function handleApi(request, response, url) {
     return requireUser(request, response, (user) => deleteInvite(request, response, user, inviteMatch[1]));
   }
 
+  // 体检报告原图读取（鉴权 + 家庭隔离，支持本地落盘文件、对象存储重定向及历史 base64 兼容）
+  const checkupImageMatch = url.pathname.match(/^\/api\/checkups\/([^/]+)\/image$/);
+  if (checkupImageMatch && request.method === "GET") {
+    return requireUser(request, response, (user) => getCheckupImage(response, user, checkupImageMatch[1]));
+  }
+
   sendJson(response, 404, { ok: false, message: "API not found" });
 }
 
@@ -250,7 +295,10 @@ async function login(request, response) {
 
   const token = randomBytes(24).toString("hex");
   const expiresAt = new Date(Date.now() + 604_800_000).toISOString();
-  await db.prepare("INSERT OR REPLACE INTO auth_sessions (token, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)").run(token, user.id, expiresAt, nowIso());
+  const now = nowIso();
+  // 顺手清理该用户已过期的历史会话，避免 auth_sessions 无限膨胀
+  await db.prepare("DELETE FROM auth_sessions WHERE user_id = ? AND expires_at <= ?").run(user.id, now);
+  await db.prepare("INSERT OR REPLACE INTO auth_sessions (token, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)").run(token, user.id, expiresAt, now);
   response.setHeader("Set-Cookie", `tg_session=${token}; ${sessionCookieAttributes(604800)}`);
   sendJson(response, 200, { ok: true, user: publicUser(user) });
 }
@@ -298,6 +346,227 @@ async function saveProfile(request, response, user) {
   const phone = normalizePhone(body.phone);
   await db.prepare("UPDATE users SET phone = ? WHERE id = ?").run(phone || null, user.id);
   sendJson(response, 200, { ok: true, phone });
+}
+
+// ---- 家庭自助注册 / 新增照护长辈 / 长辈免密绑定链接 ----
+
+const elderLoginLinkTtlMs = 24 * 60 * 60 * 1000;
+const elderSessionTtlSeconds = 90 * 24 * 60 * 60;
+
+async function registerFamily(request, response) {
+  const ip = clientIp(request);
+  const limitMessage = checkInviteRateLimit(ip);
+  if (limitMessage) {
+    sendJson(response, 429, { ok: false, message: limitMessage });
+    return;
+  }
+
+  const body = await readJson(request);
+  let caregiverUsername;
+  let caregiverPassword;
+  let caregiverDisplayName;
+  let relation;
+  let elderDisplayName;
+  let elderUsername;
+  let elderPassword;
+  try {
+    caregiverDisplayName = normalizeInviteDisplayName(body.caregiverDisplayName);
+    caregiverUsername = normalizeInviteUsername(body.caregiverUsername);
+    caregiverPassword = normalizeInvitePassword(body.caregiverPassword);
+    relation = normalizeInviteRelation(body.relation || "家属");
+    elderDisplayName = normalizeInviteDisplayName(body.elderDisplayName);
+    elderUsername = body.elderUsername ? normalizeInviteUsername(body.elderUsername) : `elder_${randomBytes(4).toString("hex")}`;
+    elderPassword = body.elderPassword ? normalizeInvitePassword(body.elderPassword) : randomBytes(12).toString("hex");
+    if (caregiverUsername.toLowerCase() === elderUsername.toLowerCase()) {
+      throw new HttpError(400, "家属登录名和长辈登录名不能相同");
+    }
+    const existingCaregiver = await db.prepare("SELECT id FROM users WHERE LOWER(username) = ?").get(caregiverUsername.toLowerCase());
+    if (existingCaregiver) throw new HttpError(400, "该家属登录名已被占用，请换一个");
+    const existingElder = await db.prepare("SELECT id FROM users WHERE LOWER(username) = ?").get(elderUsername.toLowerCase());
+    if (existingElder) throw new HttpError(400, "该长辈登录名已被占用，请换一个");
+  } catch (error) {
+    recordInviteFailure(ip);
+    throw error;
+  }
+
+  const caregiverId = createId("user");
+  const elderId = createId("user");
+  const now = nowIso();
+  await db
+    .prepare("INSERT INTO users (id, username, password_hash, display_name, role, active_elder_id, created_at) VALUES (?, ?, ?, ?, 'caregiver', ?, ?)")
+    .run(caregiverId, caregiverUsername, hashPassword(caregiverPassword), caregiverDisplayName, elderId, now);
+  await db
+    .prepare("INSERT INTO users (id, username, password_hash, display_name, role, created_at) VALUES (?, ?, ?, ?, 'elder', ?)")
+    .run(elderId, elderUsername, hashPassword(elderPassword), elderDisplayName, now);
+  await db
+    .prepare("INSERT INTO family_links (id, caregiver_id, elder_id, relation) VALUES (?, ?, ?, ?)")
+    .run(createId("link"), caregiverId, elderId, relation);
+
+  const sessionToken = randomBytes(24).toString("hex");
+  const expiresAt = new Date(Date.now() + 604_800_000).toISOString();
+  await db.prepare("INSERT OR REPLACE INTO auth_sessions (token, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)").run(sessionToken, caregiverId, expiresAt, now);
+  response.setHeader("Set-Cookie", `tg_session=${sessionToken}; ${sessionCookieAttributes(604800)}`);
+  inviteFailures.delete(ip);
+
+  const createdCaregiver = await db.prepare("SELECT * FROM users WHERE id = ?").get(caregiverId);
+  const createdElder = await db.prepare("SELECT * FROM users WHERE id = ?").get(elderId);
+  sendJson(response, 200, { ok: true, user: publicUser(createdCaregiver), elder: publicUser(createdElder) });
+}
+
+async function createElder(request, response, user) {
+  assertCaregiver(user);
+  const body = await readJson(request);
+  const displayName = normalizeInviteDisplayName(body.displayName);
+  const relation = normalizeInviteRelation(body.relation || "家属");
+  const username = body.username ? normalizeInviteUsername(body.username) : `elder_${randomBytes(4).toString("hex")}`;
+  const password = body.password ? normalizeInvitePassword(body.password) : randomBytes(12).toString("hex");
+  const existing = await db.prepare("SELECT id FROM users WHERE LOWER(username) = ?").get(username.toLowerCase());
+  if (existing) throw new HttpError(400, "该登录名已被占用，请换一个");
+
+  const elderId = createId("user");
+  const now = nowIso();
+  await db
+    .prepare("INSERT INTO users (id, username, password_hash, display_name, role, created_at) VALUES (?, ?, ?, ?, 'elder', ?)")
+    .run(elderId, username, hashPassword(password), displayName, now);
+  await db
+    .prepare("INSERT INTO family_links (id, caregiver_id, elder_id, relation) VALUES (?, ?, ?, ?)")
+    .run(createId("link"), user.id, elderId, relation);
+  await db.prepare("UPDATE users SET active_elder_id = ? WHERE id = ?").run(elderId, user.id);
+
+  const created = await db.prepare("SELECT * FROM users WHERE id = ?").get(elderId);
+  sendJson(response, 200, { ok: true, elder: publicUser(created) });
+}
+
+// 生成长辈免密登录链接：让家属把链接发到老人手机上（微信/短信），老人点一下直接进入并保持 90 天登录，无需记密码。
+async function createElderLoginLink(request, response, user) {
+  assertCaregiver(user);
+  const elder = await getBoundElder(user);
+  const id = createId("elink");
+  const token = randomBytes(32).toString("hex");
+  const createdAt = nowIso();
+  const expiresAt = new Date(Date.now() + elderLoginLinkTtlMs).toISOString();
+  await db
+    .prepare("INSERT INTO elder_login_links (id, elder_id, created_by, token_hash, expires_at, used_at, created_at) VALUES (?, ?, ?, ?, ?, NULL, ?)")
+    .run(id, elder.id, user.id, hashInviteToken(token), expiresAt, createdAt);
+
+  const origin = requestOrigin(request, new URL(request.url, "http://127.0.0.1"));
+  sendJson(response, 200, {
+    ok: true,
+    loginLink: {
+      id,
+      elderName: elder.displayName,
+      expiresAt,
+      token,
+      url: `${origin}/?elder_login=${token}`,
+    },
+  });
+}
+
+async function consumeElderLoginLink(request, response) {
+  const ip = clientIp(request);
+  const limitMessage = checkInviteRateLimit(ip);
+  if (limitMessage) {
+    sendJson(response, 429, { ok: false, message: limitMessage });
+    return;
+  }
+
+  const body = await readJson(request);
+  const rawToken = String(body.token ?? "").trim();
+  if (!rawToken) {
+    recordInviteFailure(ip);
+    throw new HttpError(400, "登录链接无效或已过期");
+  }
+  const link = await db.prepare("SELECT * FROM elder_login_links WHERE token_hash = ?").get(hashInviteToken(rawToken));
+  if (!link || link.used_at || !link.expires_at || new Date(link.expires_at).getTime() <= Date.now()) {
+    recordInviteFailure(ip);
+    throw new HttpError(400, "登录链接无效、已使用或已过期，请让家人重新生成");
+  }
+
+  const usedAt = nowIso();
+  const result = await db
+    .prepare("UPDATE elder_login_links SET used_at = ? WHERE id = ? AND used_at IS NULL")
+    .run(usedAt, link.id);
+  const changes = Number(result?.changes ?? result?.rowsAffected ?? 0);
+  if (changes !== 1) {
+    recordInviteFailure(ip);
+    throw new HttpError(400, "登录链接已被使用，请让家人重新生成");
+  }
+
+  const elder = await db.prepare("SELECT * FROM users WHERE id = ? AND role = 'elder'").get(link.elder_id);
+  if (!elder) throw new HttpError(404, "未找到对应的长辈账号");
+
+  const sessionToken = randomBytes(24).toString("hex");
+  const expiresAt = new Date(Date.now() + elderSessionTtlSeconds * 1000).toISOString();
+  await db
+    .prepare("INSERT OR REPLACE INTO auth_sessions (token, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)")
+    .run(sessionToken, elder.id, expiresAt, usedAt);
+  response.setHeader("Set-Cookie", `tg_session=${sessionToken}; ${sessionCookieAttributes(elderSessionTtlSeconds)}`);
+  inviteFailures.delete(ip);
+  sendJson(response, 200, { ok: true, user: publicUser(elder) });
+}
+
+// ---- 长辈健康急救卡 & 静默未活跃告警设置（elder_profiles）----
+
+function mapElderProfile(row) {
+  return {
+    bloodType: row?.blood_type || "",
+    allergies: row?.allergies || "",
+    chronicConditions: row?.chronic_conditions || "",
+    emergencyHospital: row?.emergency_hospital || "",
+    doctorName: row?.doctor_name || "",
+    doctorPhone: row?.doctor_phone || "",
+    notes: row?.notes || "",
+    inactivityAlertEnabled: Boolean(row?.inactivity_alert_enabled),
+    inactivityDeadline: row?.inactivity_deadline || "12:00",
+    updatedAt: row?.updated_at || null,
+  };
+}
+
+async function getElderProfile(elderId) {
+  const row = await db.prepare("SELECT * FROM elder_profiles WHERE elder_id = ?").get(elderId);
+  return mapElderProfile(row);
+}
+
+async function getElderProfileHandler(response, user) {
+  const elder = await getBoundElder(user);
+  sendJson(response, 200, { ok: true, profile: await getElderProfile(elder.id) });
+}
+
+async function saveElderProfile(request, response, user) {
+  assertCaregiver(user);
+  const elder = await getBoundElder(user);
+  const body = await readJson(request);
+  const bloodType = String(body.bloodType ?? "").trim().slice(0, 16);
+  const allergies = String(body.allergies ?? "").trim().slice(0, 200);
+  const chronicConditions = String(body.chronicConditions ?? "").trim().slice(0, 200);
+  const emergencyHospital = String(body.emergencyHospital ?? "").trim().slice(0, 100);
+  const doctorName = String(body.doctorName ?? "").trim().slice(0, 40);
+  const doctorPhone = body.doctorPhone ? normalizePhone(String(body.doctorPhone)) : "";
+  const notes = String(body.notes ?? "").trim().slice(0, 300);
+  const inactivityAlertEnabled = body.inactivityAlertEnabled ? 1 : 0;
+  const inactivityDeadline = validateTimeOfDay(body.inactivityDeadline || "12:00", "未活跃检查时间").slice(0, 5);
+  const updatedAt = nowIso();
+
+  await db
+    .prepare(
+      `INSERT INTO elder_profiles
+       (elder_id, blood_type, allergies, chronic_conditions, emergency_hospital, doctor_name, doctor_phone, notes, inactivity_alert_enabled, inactivity_deadline, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(elder_id) DO UPDATE SET
+         blood_type = excluded.blood_type,
+         allergies = excluded.allergies,
+         chronic_conditions = excluded.chronic_conditions,
+         emergency_hospital = excluded.emergency_hospital,
+         doctor_name = excluded.doctor_name,
+         doctor_phone = excluded.doctor_phone,
+         notes = excluded.notes,
+         inactivity_alert_enabled = excluded.inactivity_alert_enabled,
+         inactivity_deadline = excluded.inactivity_deadline,
+         updated_at = excluded.updated_at`
+    )
+    .run(elder.id, bloodType, allergies, chronicConditions, emergencyHospital, doctorName, doctorPhone, notes, inactivityAlertEnabled, inactivityDeadline, updatedAt);
+
+  sendJson(response, 200, { ok: true, profile: await getElderProfile(elder.id) });
 }
 
 // 家属关联的全部长辈（按建立关联的先后顺序，保持和旧版「取第一条」一致的兜底语义），
@@ -501,7 +770,24 @@ function checkInviteRateLimit(ip) {
   return null;
 }
 
+// 内存级限流表上限：避免长驻进程遭遇随机 IP/用户名探测时 Map 无限膨胀
+const rateLimitMapMaxEntries = 500;
+
+function pruneRateLimitMap(map) {
+  if (map.size < rateLimitMapMaxEntries) return;
+  const now = Date.now();
+  for (const [key, entry] of map.entries()) {
+    if (entry.lockedUntil && entry.lockedUntil <= now) map.delete(key);
+  }
+  while (map.size >= rateLimitMapMaxEntries) {
+    const oldestKey = map.keys().next().value;
+    if (oldestKey === undefined) break;
+    map.delete(oldestKey);
+  }
+}
+
 function recordInviteFailure(ip) {
+  pruneRateLimitMap(inviteFailures);
   const entry = inviteFailures.get(ip) || { count: 0, lockedUntil: 0 };
   entry.count += 1;
   if (entry.count >= inviteFailureLimit) {
@@ -605,7 +891,9 @@ async function dashboard(response, user) {
   // 家属端的「切换长辈」列表与长辈端的紧急联系人：都跟当前生效的长辈保持一致
   const elders = await listElders(user);
   const emergencyContacts = await listEmergencyContacts(elder.id);
+  // 家庭成员名单（关联家属 + 长辈本人），供「角色与权限」表格渲染
   const members = await listHouseholdMembers(elder);
+  const elderProfile = await getElderProfile(elder.id);
   await ensureTodayMedicationLogs(elder.id);
   const today = todayDate();
   // 停用的计划（enabled = 0）只保留历史服药记录：done / missed 的日志照旧显示，
@@ -636,7 +924,7 @@ async function dashboard(response, user) {
     .all(elder.id, dateDaysAgo(7));
   const weather = (await db.prepare("SELECT * FROM weather_settings WHERE elder_id = ?").get(elder.id)) || null;
   const weatherCare = await buildWeatherCare(weather);
-  const bloodPressure = await db.prepare("SELECT * FROM blood_pressure_logs WHERE elder_id = ? ORDER BY measured_at ASC LIMIT 60").all(elder.id);
+  const bloodPressure = await listRecentBloodPressure(elder.id, 60);
   const checkups = await db.prepare("SELECT id, elder_id, uploaded_by, file_name, summary, risk_level, source, created_at FROM checkup_reports WHERE elder_id = ? ORDER BY created_at DESC LIMIT 8").all(elder.id);
   // 生活事件：dashboard 只带最近 20 条，完整历史走 GET /api/life-events（前端不必再发一次请求就能渲染概览）
   const lifeEvents = await db.prepare("SELECT id, kind, raw_text, occurred_at, source, created_at FROM life_events WHERE elder_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 20").all(elder.id);
@@ -652,6 +940,8 @@ async function dashboard(response, user) {
     emergencyContacts,
     // 家庭成员名单（关联家属 + 长辈本人），供「角色与权限」表格渲染
     members,
+    // 长辈健康急救卡与静默未活跃告警设置
+    elderProfile,
     medications,
     tasks,
     alerts,
@@ -687,14 +977,6 @@ function normalizeVisitSummaryDays(value) {
   return Math.min(visitSummaryMaxDays, Math.max(visitSummaryMinDays, Math.trunc(parsed)));
 }
 
-// 单条血压是否异常：复用 analyzeBloodPressure（只传这一条），level 为 warning / danger 即算异常。
-// 选择「逐条判定」而不是「用整段的 level」：整段 level 只由最后一条决定，
-// 当区间内有 3 条偏高、最后一条却正常时，整段口径会把异常条数算成 0，误导医生。
-function isAbnormalBloodPressure(record) {
-  const level = analyzeBloodPressure([record]).level;
-  return level === "warning" || level === "danger";
-}
-
 // 复诊摘要聚合接口：一次请求拿齐复诊需要的全部数据，避免前端发十几个请求。
 // 注意所有区间过滤都用 substr(时间列, 1, 10) 做「日期」比较（与 buildDailyReport 同一口径），
 // 避免 ISO 时间戳里的时区差异把边界当天的记录挤出去。
@@ -714,7 +996,7 @@ async function visitSummary(response, user, url) {
   // 用药计划：返回「全部」计划（含 enabled = 0），前端要标注已停用，所以这里不能按 enabled 过滤
   const medications = await db
     .prepare(
-      `SELECT medicine_name, time_of_day, dose_note, enabled
+      `SELECT medicine_name, time_of_day, dose_note, repeat_rule, repeat_days, start_date, end_date, enabled
        FROM medication_schedules
        WHERE elder_id = ?
        ORDER BY time_of_day ASC`
@@ -792,16 +1074,25 @@ async function visitSummary(response, user, url) {
     )
     .all(elder.id, periodStart, today);
 
+  // 结构化体检指标趋势：医生复诊时最常对比的关键化验项（血糖、血脂、尿酸等）
+  const indicators = await buildElderCheckupIndicators(elder.id);
+  const elderProfile = await getElderProfile(elder.id);
+
   sendJson(response, 200, {
     ok: true,
     generatedAt: nowIso(),
     periodDays,
     periodStart,
     elder: { displayName: elder.displayName, relation },
+    elderProfile,
     medications: medications.map((row) => ({
       medicineName: row.medicine_name,
       timeOfDay: row.time_of_day,
       doseNote: row.dose_note ?? "",
+      repeatRule: row.repeat_rule || "daily",
+      repeatDays: row.repeat_days || "",
+      startDate: row.start_date || "",
+      endDate: row.end_date || "",
       enabled: row.enabled,
     })),
     bloodPressure: {
@@ -819,9 +1110,19 @@ async function visitSummary(response, user, url) {
     adherence: { total, done, missed, pending, rate, missedDetails },
     unwellEvents: unwellEvents.map((row) => ({ rawText: row.raw_text, occurredAt: row.occurred_at, createdAt: row.created_at })),
     checkups: checkups.map((row) => ({ createdAt: row.created_at, summary: row.summary, riskLevel: row.risk_level, source: row.source })),
+    indicators,
     // 前端暂时不用这一项，先保留契约里的空字段，避免以后加备注时前端要改判空逻辑
     notes: "",
   });
+}
+
+// 取最近 N 条血压记录，并按测量时间升序返回（供趋势图与 analyzeBloodPressure 使用）。
+// 之前直接 ORDER BY measured_at ASC LIMIT 60 会取到「最早的 60 条」，超过 60 条后新记录会从看板消失。
+async function listRecentBloodPressure(elderId, limit = 60) {
+  const rows = await db
+    .prepare("SELECT * FROM blood_pressure_logs WHERE elder_id = ? ORDER BY measured_at DESC, rowid DESC LIMIT ?")
+    .all(elderId, limit);
+  return rows.reverse();
 }
 
 async function createBloodPressure(request, response, user) {
@@ -843,7 +1144,7 @@ async function createBloodPressure(request, response, user) {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(id, elder.id, user.id, Math.round(systolic), Math.round(diastolic), pulse === null ? null : Math.round(pulse), note, measuredAt, nowIso());
 
-  const logs = await db.prepare("SELECT * FROM blood_pressure_logs WHERE elder_id = ? ORDER BY measured_at ASC LIMIT 60").all(elder.id);
+  const logs = await listRecentBloodPressure(elder.id, 60);
   const summary = analyzeBloodPressure(logs);
   const isAbnormal = summary.level === "danger" || summary.level === "warning";
   const bpText = `${summary.latest.systolic}/${summary.latest.diastolic} mmHg${pulse ? `，心率 ${pulse}` : ""}`;
@@ -860,7 +1161,7 @@ async function createBloodPressure(request, response, user) {
 
 async function bloodPressureList(response, user) {
   const elder = await getBoundElder(user);
-  const bloodPressure = await db.prepare("SELECT * FROM blood_pressure_logs WHERE elder_id = ? ORDER BY measured_at ASC LIMIT 60").all(elder.id);
+  const bloodPressure = await listRecentBloodPressure(elder.id, 60);
   sendJson(response, 200, { ok: true, bloodPressure, summary: analyzeBloodPressure(bloodPressure) });
 }
 
@@ -874,10 +1175,12 @@ async function analyzeCheckup(request, response, user) {
 
   const advice = await generateCheckupAdvice({ elder, imageData, fileName });
   const id = createId("checkup");
+  // 将原图存入独立存储层（本地 data/uploads 或对象存储），数据库仅保留轻量引用，避免大块 base64 撑爆库
+  const stored = await storeCheckupImage({ rootDir: root, reportId: id, imageData, fetchWithTimeout });
   await db.prepare(
     `INSERT INTO checkup_reports (id, elder_id, uploaded_by, file_name, image_data, summary, advice_json, risk_level, source, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(id, elder.id, user.id, fileName, imageData, advice.summary, JSON.stringify(advice), advice.risk_level, advice.source, nowIso());
+  ).run(id, elder.id, user.id, fileName, stored.storageRef, advice.summary, JSON.stringify(advice), advice.risk_level, advice.source, nowIso());
 
   const message = `${elder.displayName}上传了体检报告照片。${advice.summary}`;
   await createAlert(elder.id, "checkup", "体检报告已分析", message, id);
@@ -888,7 +1191,24 @@ async function analyzeCheckup(request, response, user) {
     message,
     { feishuCard: buildSimpleCard("体检报告已分析", `${elder.displayName}上传了体检报告照片。\n${advice.summary}`) }
   );
-  sendJson(response, 200, { ok: true, report: { id, ...advice } });
+  sendJson(response, 200, { ok: true, report: { id, storageBackend: stored.backend, imageUrl: `/api/checkups/${id}/image`, ...advice } });
+}
+
+async function getCheckupImage(response, user, reportId) {
+  const elder = await getBoundElder(user);
+  const row = await db
+    .prepare("SELECT image_data FROM checkup_reports WHERE id = ? AND elder_id = ?")
+    .get(reportId, elder.id);
+  if (!row) throw new HttpError(404, "未找到该体检报告照片");
+  const media = readStoredCheckupImage({ rootDir: root, storageRef: row.image_data });
+  if (!media) throw new HttpError(404, "体检报告原图不存在或已被清理");
+  if (media.kind === "redirect") {
+    response.writeHead(302, { Location: media.url, "Cache-Control": "private, max-age=300" });
+    response.end();
+    return;
+  }
+  response.writeHead(200, { "Content-Type": media.mime, "Cache-Control": "private, max-age=300" });
+  response.end(media.buffer);
 }
 
 // ---- 体检指标（checkup_indicators）：结构化记录 + 趋势对比 ----
@@ -1027,8 +1347,7 @@ function buildIndicatorSummary(name, items) {
 }
 
 // 体检指标趋势：长辈名下所有出现过的指标按名分组，超范围的排前面。
-async function checkupIndicatorList(response, user) {
-  const elder = await getBoundElder(user);
+async function buildElderCheckupIndicators(elderId) {
   // 一次取全量（家属手工录入，量级很小）；排序在这里定死，供 latest / previous / history 共用同一口径
   const rows = await db
     .prepare(
@@ -1037,7 +1356,7 @@ async function checkupIndicatorList(response, user) {
        WHERE elder_id = ?
        ORDER BY measured_date ASC, created_at ASC, rowid ASC`
     )
-    .all(elder.id);
+    .all(elderId);
 
   const groups = new Map();
   for (const row of rows) {
@@ -1055,7 +1374,12 @@ async function checkupIndicatorList(response, user) {
     if (aFlagged !== bFlagged) return aFlagged ? -1 : 1;
     return compareIndicatorName(a.name, b.name);
   });
-  sendJson(response, 200, { ok: true, indicators });
+  return indicators;
+}
+
+async function checkupIndicatorList(response, user) {
+  const elder = await getBoundElder(user);
+  sendJson(response, 200, { ok: true, indicators: await buildElderCheckupIndicators(elder.id) });
 }
 
 async function saveCheckupIndicators(request, response, user) {
@@ -1093,6 +1417,30 @@ async function deleteCheckupIndicator(request, response, user, indicatorId) {
   sendJson(response, 200, { ok: true });
 }
 
+// ---- 用药周期规则：支持每天（daily）、隔日（alternate）、每周固定日（weekly）及起止日期（疗程）----
+const medicationRepeatRules = new Set(["daily", "alternate", "weekly"]);
+
+function normalizeMedicationRepeatRule(value) {
+  const rule = String(value ?? "daily").trim() || "daily";
+  if (!medicationRepeatRules.has(rule)) throw new HttpError(400, "用药频率只能是 daily（每天）、alternate（隔日）或 weekly（每周固定日）");
+  return rule;
+}
+
+// 周几列表：1=周一 .. 7=周日，支持数组或逗号分隔字符串，去重排序后存成 "1,3,5"
+function normalizeMedicationRepeatDays(value, repeatRule) {
+  if (repeatRule !== "weekly") return "";
+  const rawList = Array.isArray(value) ? value : String(value ?? "").split(/[,，\s]+/);
+  const days = [...new Set(rawList.map((item) => Number(String(item).trim())).filter((n) => Number.isInteger(n) && n >= 1 && n <= 7))].sort((a, b) => a - b);
+  if (!days.length) throw new HttpError(400, "每周固定日用药请至少选择一天（周一到周日）");
+  return days.join(",");
+}
+
+function normalizeOptionalIsoDate(value, label) {
+  const text = String(value ?? "").trim();
+  if (!text) return null;
+  return normalizeIsoDate(text, label);
+}
+
 async function createMedication(request, response, user) {
   assertCaregiver(user);
   const elder = await getBoundElder(user);
@@ -1101,16 +1449,21 @@ async function createMedication(request, response, user) {
   const timeOfDay = validateTimeOfDay(body.timeOfDay, "用药时间");
   const doseNote = String(body.doseNote || "").trim();
   const mealTiming = String(body.mealTiming || "").trim();
+  const repeatRule = normalizeMedicationRepeatRule(body.repeatRule);
+  const repeatDays = normalizeMedicationRepeatDays(body.repeatDays, repeatRule);
+  const startDate = normalizeOptionalIsoDate(body.startDate, "开始日期") || (repeatRule === "alternate" ? todayDate() : null);
+  const endDate = normalizeOptionalIsoDate(body.endDate, "结束日期");
+  if (startDate && endDate && endDate < startDate) throw new HttpError(400, "结束日期不能早于开始日期");
   const id = createId("med");
 
   await db.prepare(
     `INSERT INTO medication_schedules
-     (id, elder_id, created_by, medicine_name, dose_note, meal_timing, time_of_day, repeat_rule, remind_elder, remind_caregiver, enabled, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'daily', 1, 1, 1, ?)`
-  ).run(id, elder.id, user.id, medicineName, doseNote, mealTiming, timeOfDay, nowIso());
+     (id, elder_id, created_by, medicine_name, dose_note, meal_timing, time_of_day, repeat_rule, repeat_days, start_date, end_date, remind_elder, remind_caregiver, enabled, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 1, ?)`
+  ).run(id, elder.id, user.id, medicineName, doseNote, mealTiming, timeOfDay, repeatRule, repeatDays, startDate, endDate, nowIso());
   await ensureTodayMedicationLogs(elder.id);
-  await createAlert(elder.id, "medication", "吃药提醒已设置", `TechGuard 吃药提醒：${elder.displayName}每天 ${timeOfDay} 需要服用${medicineName}${doseNote ? `（${doseNote}）` : ""}。`);
-  await notifyElder(elder, "task_assigned", "新的吃药提醒", `${user.displayName}为您设置了吃药提醒：\n每天 ${timeOfDay} 服用${medicineName}${doseNote ? `（${doseNote}）` : ""}。`);
+  await createAlert(elder.id, "medication", "吃药提醒已设置", `TechGuard 吃药提醒：${elder.displayName} ${timeOfDay} 需要服用${medicineName}${doseNote ? `（${doseNote}）` : ""}。`);
+  await notifyElder(elder, "task_assigned", "新的吃药提醒", `${user.displayName}为您设置了吃药提醒：\n${timeOfDay} 服用${medicineName}${doseNote ? `（${doseNote}）` : ""}。`);
   sendJson(response, 200, { ok: true, id });
 }
 
@@ -1120,7 +1473,7 @@ async function medicationList(response, user) {
   const elder = await getBoundElder(user);
   const medications = await db
     .prepare(
-      `SELECT id, medicine_name, time_of_day, dose_note, meal_timing, repeat_rule, enabled, remind_elder, remind_caregiver, created_at
+      `SELECT id, medicine_name, time_of_day, dose_note, meal_timing, repeat_rule, repeat_days, start_date, end_date, enabled, remind_elder, remind_caregiver, created_at
        FROM medication_schedules
        WHERE elder_id = ?
        ORDER BY time_of_day ASC`
@@ -1135,7 +1488,7 @@ async function updateMedication(request, response, user, scheduleId) {
   assertCaregiver(user);
   const elder = await getBoundElder(user);
   // 不属于该家属绑定长辈的 id 一律按 404 处理，避免用状态码泄露「别人家的计划是否存在」
-  const existing = await db.prepare("SELECT id FROM medication_schedules WHERE id = ? AND elder_id = ?").get(scheduleId, elder.id);
+  const existing = await db.prepare("SELECT * FROM medication_schedules WHERE id = ? AND elder_id = ?").get(scheduleId, elder.id);
   if (!existing) throw new HttpError(404, "未找到该吃药计划");
 
   const body = await readJson(request);
@@ -1144,6 +1497,16 @@ async function updateMedication(request, response, user, scheduleId) {
   if (body.timeOfDay !== undefined) updates.time_of_day = validateTimeOfDay(body.timeOfDay, "用药时间");
   if (body.doseNote !== undefined) updates.dose_note = String(body.doseNote || "").trim();
   if (body.enabled !== undefined) updates.enabled = normalizeEnabledFlag(body.enabled);
+  const nextRule = body.repeatRule !== undefined ? normalizeMedicationRepeatRule(body.repeatRule) : existing.repeat_rule || "daily";
+  if (body.repeatRule !== undefined) updates.repeat_rule = nextRule;
+  if (body.repeatDays !== undefined || body.repeatRule !== undefined) {
+    updates.repeat_days = normalizeMedicationRepeatDays(body.repeatDays !== undefined ? body.repeatDays : existing.repeat_days, nextRule);
+  }
+  const nextStart = body.startDate !== undefined ? normalizeOptionalIsoDate(body.startDate, "开始日期") : existing.start_date;
+  const nextEnd = body.endDate !== undefined ? normalizeOptionalIsoDate(body.endDate, "结束日期") : existing.end_date;
+  if (nextStart && nextEnd && nextEnd < nextStart) throw new HttpError(400, "结束日期不能早于开始日期");
+  if (body.startDate !== undefined) updates.start_date = nextStart;
+  if (body.endDate !== undefined) updates.end_date = nextEnd;
 
   // updates 的 key 来自上面的白名单字面量，不是用户输入，拼 SQL 不存在注入风险
   const fields = Object.keys(updates);
@@ -1205,14 +1568,28 @@ function normalizeStockInteger(value, min, max, message) {
   return parsed;
 }
 
-// 该长辈每个药名下「启用中的计划条数」= 每日剂数。
-// 按药名而不是按单条 schedule 归集：一种药一天吃三次是三条 daily 计划，但它们共用同一盒药，
-// 挂在某个 schedule 上算库存必然算错。
+// 该长辈每个药名下「启用中的日均剂数」：
+// daily = 1 剂/天；alternate = 0.5 剂/天；weekly = 每周天数 / 7；已过结束日期的疗程计 0。
 async function enabledDosesPerMedicine(elderId) {
+  const today = todayDate();
   const rows = await db
-    .prepare("SELECT medicine_name, COUNT(*) AS count FROM medication_schedules WHERE elder_id = ? AND enabled = 1 GROUP BY medicine_name")
+    .prepare("SELECT medicine_name, repeat_rule, repeat_days, end_date FROM medication_schedules WHERE elder_id = ? AND enabled = 1")
     .all(elderId);
-  return new Map(rows.map((row) => [row.medicine_name, Number(row.count) || 0]));
+  const map = new Map();
+  for (const row of rows) {
+    if (row.end_date && row.end_date < today) continue;
+    let weight = 1;
+    if (row.repeat_rule === "alternate") {
+      weight = 0.5;
+    } else if (row.repeat_rule === "weekly") {
+      const count = String(row.repeat_days || "")
+        .split(",")
+        .filter((item) => /^[1-7]$/.test(item.trim())).length;
+      weight = count / 7;
+    }
+    map.set(row.medicine_name, (map.get(row.medicine_name) || 0) + weight);
+  }
+  return map;
 }
 
 // 出参统一形状：GET 列表元素与 POST 返回的 stock 共用这一份映射，前端只需一套渲染逻辑。
@@ -1345,6 +1722,14 @@ async function completeMedication(request, response, user, logId) {
   sendJson(response, 200, { ok: true });
 }
 
+const taskRepeatRules = new Set(["none", "daily", "weekly"]);
+
+function normalizeTaskRepeatRule(value) {
+  const rule = String(value ?? "none").trim() || "none";
+  if (!taskRepeatRules.has(rule)) throw new HttpError(400, "任务重复规则只能是 none（单次）、daily（每天）或 weekly（每周）");
+  return rule;
+}
+
 async function createTask(request, response, user) {
   assertCaregiver(user);
   const elder = await getBoundElder(user);
@@ -1354,13 +1739,14 @@ async function createTask(request, response, user) {
   const dueDate = normalizeIsoDate(body.dueDate || todayDate(), "任务日期");
   // 任务时间必须是 HH:MM（或 HH:MM:SS），否则字符串比较会漏提醒
   const dueTime = validateTimeOfDay(body.dueTime || "09:00", "任务时间");
+  const repeatRule = normalizeTaskRepeatRule(body.repeatRule);
   const id = createId("task");
 
   await db.prepare(
     `INSERT INTO care_tasks
      (id, elder_id, created_by, title, description, due_date, due_time, repeat_rule, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'none', 'pending', ?)`
-  ).run(id, elder.id, user.id, title, description, dueDate, dueTime, nowIso());
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
+  ).run(id, elder.id, user.id, title, description, dueDate, dueTime, repeatRule, nowIso());
   await createAlert(elder.id, "task", "任务已安排", `TechGuard 任务提醒：${elder.displayName} ${dueDate} ${dueTime} 需要完成：${title}。`);
   await notifyElder(elder, "task_assigned", "家人安排了新任务", `${user.displayName}给您安排了新任务：\n${title}${description ? `\n说明：${description}` : ""}\n时间：${dueDate} ${dueTime}`);
   sendJson(response, 200, { ok: true, id });
@@ -1371,9 +1757,31 @@ async function completeTask(request, response, user, taskId) {
   const body = await readJson(request);
   const task = await db.prepare("SELECT * FROM care_tasks WHERE id = ? AND elder_id = ?").get(taskId, elder.id);
   if (!task) return sendJson(response, 404, { ok: false, message: "未找到任务" });
+  const wasDone = task.status === "done";
   await db.prepare("UPDATE care_tasks SET status = 'done', completed_at = ?, completion_note = ? WHERE id = ?").run(nowIso(), String(body.note || ""), taskId);
-  await notifyElderCaregivers(elder.id, "task_completed", "任务已完成", `${elder.displayName}完成了任务：${task.title}。`, { feishuCard: buildSimpleCard("✅ 任务已完成", `${elder.displayName}完成了任务：${task.title}\n时间：${task.due_date} ${task.due_time}`) });
-  sendJson(response, 200, { ok: true });
+
+  // 周期任务（daily / weekly）完成时自动生成下一次待办（幂等：重复点完成不再重复生成）
+  let nextTaskId = null;
+  if (!wasDone && (task.repeat_rule === "daily" || task.repeat_rule === "weekly")) {
+    const stepDays = task.repeat_rule === "daily" ? 1 : 7;
+    const nextDate = addDaysToIsoDate(task.due_date, stepDays);
+    const existingNext = await db
+      .prepare("SELECT id FROM care_tasks WHERE elder_id = ? AND title = ? AND due_date = ? AND due_time = ? AND status = 'pending'")
+      .get(elder.id, task.title, nextDate, task.due_time);
+    if (!existingNext) {
+      nextTaskId = createId("task");
+      await db.prepare(
+        `INSERT INTO care_tasks
+         (id, elder_id, created_by, title, description, due_date, due_time, repeat_rule, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
+      ).run(nextTaskId, elder.id, task.created_by, task.title, task.description || "", nextDate, task.due_time, task.repeat_rule, nowIso());
+    }
+  }
+
+  if (!wasDone) {
+    await notifyElderCaregivers(elder.id, "task_completed", "任务已完成", `${elder.displayName}完成了任务：${task.title}。`, { feishuCard: buildSimpleCard("✅ 任务已完成", `${elder.displayName}完成了任务：${task.title}\n时间：${task.due_date} ${task.due_time}`) });
+  }
+  sendJson(response, 200, { ok: true, nextTaskId });
 }
 
 // 任务状态白名单：写入前必须挡住任意字符串，否则 dashboard / cron 的 status = 'pending' 判断会全部失效
@@ -1393,6 +1801,7 @@ async function updateTask(request, response, user, taskId) {
   // due_date / due_time 是 dashboard 与 cron 做字符串比较的依据，空值会让任务从列表里消失，必须校验
   if (body.dueDate !== undefined) updates.due_date = normalizeIsoDate(body.dueDate, "任务日期");
   if (body.dueTime !== undefined) updates.due_time = validateTimeOfDay(body.dueTime, "任务时间");
+  if (body.repeatRule !== undefined) updates.repeat_rule = normalizeTaskRepeatRule(body.repeatRule);
   if (body.status !== undefined) {
     const status = String(body.status);
     if (!taskStatuses.includes(status)) throw new HttpError(400, "任务状态只能是 pending、done 或 missed");
@@ -1447,20 +1856,102 @@ async function weatherCare(response, user) {
 async function fraudCheck(request, response, user) {
   const elder = await getBoundElder(user);
   const body = await readJson(request);
-  const text = required(body.text, "短信内容不能为空");
-  const result = analyzeFraud(text);
+  const text = String(body.text || "").trim();
+  const imageData = String(body.imageData || "").trim();
+  if (!text && !imageData) throw new HttpError(400, "请粘贴可疑短信，或上传可疑聊天/短信截图");
+
+  let result;
+  if (imageData) {
+    if (!/^data:image\/(png|jpeg|jpg|webp);base64,/i.test(imageData)) {
+      throw new HttpError(400, "截图只支持 PNG、JPG 或 WebP 格式");
+    }
+    if (imageData.length > 5_500_000) {
+      throw new HttpError(400, "截图文件太大，请重新截取更小范围的图片");
+    }
+    result = await analyzeFraudImage({ elder, imageData, supplementalText: text });
+  } else {
+    result = { ...analyzeFraud(text, elder.displayName), source: "local-rules" };
+  }
+
   if (result.score >= 80) {
-    const message = `${elder.displayName}收到疑似${result.type}短信，请尽快联系老人，提醒不要点链接、不要回验证码、不要转账。`;
-    await createAlert(elder.id, "fraud", "高危短信提醒", message);
+    const channelLabel = imageData ? "截图" : "短信";
+    const message = `${elder.displayName}提交了疑似${result.type}${channelLabel}，请尽快联系老人，提醒不要点链接、不要回验证码、不要转账。`;
+    await createAlert(elder.id, "fraud", "高危防骗提醒", message);
     await notifyElderCaregivers(
       elder.id,
       "fraud_detected",
-      "高危短信提醒",
+      "高危防骗提醒",
       message,
-      { feishuCard: buildSimpleCard("高危短信提醒", message) }
+      { feishuCard: buildSimpleCard("⚠️ 高危防骗提醒", message) }
     );
   }
   sendJson(response, 200, { ok: true, result });
+}
+
+async function analyzeFraudImage({ elder, imageData, supplementalText }) {
+  const addressee = String(elder?.displayName || "").trim() || "您";
+  const textFallback = supplementalText ? analyzeFraud(supplementalText, addressee) : null;
+  const fallback = textFallback
+    ? {
+        ...textFallback,
+        reasons: [...textFallback.reasons, "当前未启用图片智能识别，以上结论基于您补充的文字内容"],
+        source: "local-fallback",
+      }
+    : {
+        score: 50,
+        level: "中风险可疑信息",
+        type: "待人工核对截图",
+        reasons: ["当前未启用图片智能识别，无法直接读取截图文字", "凡是索要验证码、催促点链接或要求转账的都极可能是诈骗"],
+        reply_for_elder: `${addressee}，目前没法直接看懂这张图片里的字，请先别点图片里的任何链接，也不要转账或报验证码，发给家人帮您看一眼最稳妥。`,
+        source: "local-fallback",
+      };
+
+  if (!openaiApiKey) return fallback;
+
+  try {
+    const aiResponse = await fetchWithTimeout("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${openaiApiKey}`,
+      },
+      body: JSON.stringify({
+        model: process.env.OPENAI_VISION_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini",
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content:
+              "你是老年人防诈骗助手。请识别图片中的短信、微信聊天、通知或网页内容，判断是否存在诈骗风险。输出严格 JSON：score (0-100整数), level (高危诈骗/中风险可疑信息/低风险信息), type (诈骗类型), reasons (字符串数组，最多5条), reply_for_elder (称呼长辈姓名，温柔简短、明确告诉老人不要做什么)。",
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: `长辈称呼：${addressee}。${supplementalText ? `补充说明：${supplementalText}` : "请分析这张截图是否有诈骗风险。"}`,
+              },
+              { type: "image_url", image_url: { url: imageData } },
+            ],
+          },
+        ],
+      }),
+    });
+    if (!aiResponse.ok) return fallback;
+    const data = await aiResponse.json();
+    const parsed = JSON.parse(data.choices?.[0]?.message?.content || "{}");
+    const score = Math.max(0, Math.min(100, Number(parsed.score) || 0));
+    return {
+      score,
+      level: String(parsed.level || (score >= 80 ? "高危诈骗" : score >= 41 ? "中风险可疑信息" : "低风险信息")),
+      type: String(parsed.type || "疑似电信网络诈骗"),
+      reasons: Array.isArray(parsed.reasons) && parsed.reasons.length ? parsed.reasons.slice(0, 6).map(String) : fallback.reasons,
+      reply_for_elder: String(parsed.reply_for_elder || fallback.reply_for_elder),
+      source: "openai-vision",
+    };
+  } catch {
+    return fallback;
+  }
 }
 
 async function travelPlan(request, response, user) {
@@ -1491,16 +1982,100 @@ async function travelPlan(request, response, user) {
   });
 }
 
+// 保留 normalizeFeishuWebhook 导出，委托给多通道统一校验器
+export function normalizeFeishuWebhook(value) {
+  try {
+    return normalizeChannelWebhook("feishu", value);
+  } catch (error) {
+    throw new HttpError(400, error.message);
+  }
+}
+
 async function saveFeishuConfig(request, response, user) {
   assertCaregiver(user);
   const body = await readJson(request);
-  const webhook = String(body.webhook || "").trim();
+  const webhook = normalizeFeishuWebhook(body.webhook);
+  const enabled = webhook ? 1 : 0;
   await db.prepare(
     `INSERT INTO notification_channels (id, owner_id, channel_type, config_json, enabled, updated_at)
-     VALUES (?, ?, 'feishu', ?, 1, ?)
-     ON CONFLICT(owner_id, channel_type) DO UPDATE SET config_json = excluded.config_json, enabled = 1, updated_at = excluded.updated_at`
-  ).run(createId("chan"), user.id, JSON.stringify({ webhook }), nowIso());
+     VALUES (?, ?, 'feishu', ?, ?, ?)
+     ON CONFLICT(owner_id, channel_type) DO UPDATE SET config_json = excluded.config_json, enabled = excluded.enabled, updated_at = excluded.updated_at`
+  ).run(createId("chan"), user.id, JSON.stringify({ webhook }), enabled, nowIso());
   sendJson(response, 200, { ok: true });
+}
+
+// 多通道通知列表：返回当前家属已配置的飞书 / 企业微信 / 钉钉通道状态（Webhook 脱敏）
+async function listNotificationChannels(response, user) {
+  assertCaregiver(user);
+  const rows = await db
+    .prepare("SELECT channel_type, config_json, enabled, updated_at FROM notification_channels WHERE owner_id = ?")
+    .all(user.id);
+  const byType = new Map(rows.map((row) => [row.channel_type, row]));
+  const channels = ["wecom", "dingtalk", "feishu"].map((channelType) => {
+    const row = byType.get(channelType);
+    let webhook = "";
+    try {
+      webhook = row ? JSON.parse(row.config_json || "{}").webhook || "" : "";
+    } catch {
+      webhook = "";
+    }
+    return {
+      channelType,
+      configured: Boolean(webhook && Number(row?.enabled) === 1),
+      maskedWebhook: maskWebhook(webhook),
+      updatedAt: row?.updated_at || null,
+    };
+  });
+  sendJson(response, 200, { ok: true, channels });
+}
+
+// 保存或清空任意受支持的群机器人通道（feishu / wecom / dingtalk）
+async function saveNotificationChannel(request, response, user) {
+  assertCaregiver(user);
+  const body = await readJson(request);
+  const channelType = String(body.channelType || "").trim();
+  if (!SUPPORTED_WEBHOOK_CHANNELS.has(channelType)) {
+    throw new HttpError(400, "不支持的通知通道，仅支持 feishu、wecom（企业微信）或 dingtalk（钉钉）");
+  }
+  let webhook;
+  try {
+    webhook = normalizeChannelWebhook(channelType, body.webhook);
+  } catch (error) {
+    throw new HttpError(400, error.message);
+  }
+  const enabled = webhook ? 1 : 0;
+  await db.prepare(
+    `INSERT INTO notification_channels (id, owner_id, channel_type, config_json, enabled, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(owner_id, channel_type) DO UPDATE SET config_json = excluded.config_json, enabled = excluded.enabled, updated_at = excluded.updated_at`
+  ).run(createId("chan"), user.id, channelType, JSON.stringify({ webhook }), enabled, nowIso());
+  sendJson(response, 200, { ok: true, channelType, configured: Boolean(webhook), maskedWebhook: maskWebhook(webhook) });
+}
+
+async function testNotificationChannel(request, response, user) {
+  assertCaregiver(user);
+  const body = await readJson(request);
+  const channelType = String(body.channelType || "feishu").trim();
+  if (!SUPPORTED_WEBHOOK_CHANNELS.has(channelType)) {
+    throw new HttpError(400, "不支持的通知通道");
+  }
+  if (channelType === "feishu") {
+    const result = await sendFeishu(user, `TechGuard 测试提醒：${user.displayName} 的飞书看护群可以接收提醒。`);
+    sendJson(response, 200, { ok: true, result });
+    return;
+  }
+  const row = await db
+    .prepare("SELECT config_json FROM notification_channels WHERE owner_id = ? AND channel_type = ? AND enabled = 1")
+    .get(user.id, channelType);
+  const webhook = row ? JSON.parse(row.config_json || "{}").webhook || "" : "";
+  if (!webhook) throw new HttpError(400, "请先保存该通道的 Webhook 地址后再测试");
+  const result = await postWebhookChannel(
+    channelType,
+    webhook,
+    { title: "TechGuard 测试提醒", body: `${user.displayName} 的照护通知通道已连通，后续长辈的重要动态会同步到这里。` },
+    fetchWithTimeout
+  );
+  sendJson(response, 200, { ok: true, result });
 }
 
 async function feishuTest(response, user) {
@@ -1549,125 +2124,7 @@ async function elderCheckIn(response, user) {
   sendJson(response, 200, { ok: true, alreadyCheckedIn: false, time: timeText, result });
 }
 
-// ---- 生活事件（life_events）：把老人原话解析成结构化事件 ----
-
-// 事件类型关键词。顺序敏感（先匹配到的赢）：「不舒服」必须排在「吃药」之前，
-// 否则「吃了降压药有点头晕」会被误判成 medication，家属端就看不到身体不适告警。
-const lifeEventKindRules = [
-  { kind: "unwell", words: ["不舒服", "头晕", "头疼", "头痛", "心慌", "胸闷", "恶心", "想吐", "疼", "难受", "发烧", "咳嗽", "没力气", "乏力", "摔"] },
-  { kind: "medication", words: ["吃药", "服药", "用药", "降压药", "药片", "胶囊", "吃过药", "吃了药"] },
-  { kind: "meal", words: ["吃饭", "早饭", "午饭", "晚饭", "早餐", "午餐", "晚餐", "喝粥", "吃了饭", "面条", "米饭"] },
-  { kind: "sleep", words: ["睡觉", "睡了", "起床", "午睡", "睡着", "失眠", "醒来"] },
-  {
-    kind: "outing",
-    words: ["出门", "散步", "溜达", "买菜", "公园", "超市", "医院", "去逛", "下楼", "广场", "活动中心"],
-    // 老人不一定会说「买菜」这种标准词：「出去买了点菜」里并不含「买菜」，
-    // 光靠 includes 匹配不到，所以这类口语说法单独用正则兜底。
-    patterns: [/出去|遛弯|菜市场|买.{0,3}菜/],
-  },
-  { kind: "mood", words: ["高兴", "开心", "愉快", "难过", "伤心", "寂寞", "孤单", "心烦", "想念", "担心"] },
-];
-
-// 纯函数：老人原话 → { kind, occurredAt }。kind 只取 7 个枚举值之一；
-// 推断不出时间就返回 null（绝不退化成当前时间，否则会伪造事件发生时刻）。
-// 导出以便独立脚本 / 测试直接验证解析规则，不必起 HTTP 服务。
-export function parseLifeEvent(text) {
-  const raw = String(text || "");
-  return { kind: detectLifeEventKind(raw), occurredAt: inferLifeEventTime(raw) };
-}
-
-function detectLifeEventKind(text) {
-  for (const rule of lifeEventKindRules) {
-    if (rule.words?.some((word) => text.includes(word))) return rule.kind;
-    if (rule.patterns?.some((pattern) => pattern.test(text))) return rule.kind;
-  }
-  return "other";
-}
-
-// 中文数字（零一~十、十一~十九、二十~二十三）转阿拉伯数字，无法识别返回 null
-// 「两」在口语里就是「二」（下午两点），不处理的话会退化成时段默认值。
-const chineseDigits = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
-
-function chineseToNumber(token) {
-  if (/^\d+$/.test(token)) return Number(token);
-  if (!/^[零一二三四五六七八九十两]+$/.test(token)) return null;
-  if (token.includes("十")) {
-    // 十 → 10、十一 → 11、二十 → 20、二十三 → 23
-    const [tensText, onesText] = token.split("十");
-    const tens = tensText === "" ? 1 : chineseDigits[tensText];
-    const ones = onesText === "" ? 0 : chineseDigits[onesText];
-    if (tens === undefined || ones === undefined) return null;
-    return tens * 10 + ones;
-  }
-  // 没有「十」时只接受单个汉字（如「八点」里的「八」）
-  if (token.length !== 1) return null;
-  return chineseDigits[token] ?? null;
-}
-
-const clockTokenPattern = "\\d{1,2}|[零一二三四五六七八九十两]+";
-
-// 从文本抽取钟点，覆盖：08:30 / 8:15 / 8点30分 / 8点半 / 八点 / 八点半 / 十二点 / 二十点
-function extractClockTime(text) {
-  // 冒号形式（兼容全角冒号）
-  const colon = /(\d{1,2})\s*[:：]\s*(\d{1,2})/.exec(text);
-  if (colon) {
-    const minute = Number(colon[2]);
-    if (minute <= 59) return { hour: Number(colon[1]), minute };
-  }
-  // 「N点半」必须先于「N点M分」判断，否则「八点半」会被读成 08:00
-  const half = new RegExp(`(${clockTokenPattern})\\s*点\\s*半`).exec(text);
-  if (half) {
-    const hour = chineseToNumber(half[1]);
-    if (hour !== null) return { hour, minute: 30 };
-  }
-  const point = new RegExp(`(${clockTokenPattern})\\s*点\\s*(\\d{1,2}|[零一二三四五六七八九十]+)?\\s*分?`).exec(text);
-  if (point) {
-    const hour = chineseToNumber(point[1]);
-    const minute = point[2] ? chineseToNumber(point[2]) : 0;
-    if (hour !== null && minute !== null && minute <= 59) return { hour, minute };
-  }
-  return null;
-}
-
-// 时段词对小时数的修正 + 「只有时段词没给钟点」时的兜底时间
-const lifeEventPeriods = [
-  { words: ["凌晨"], defaultTime: "04:00", apply: (hour) => hour },
-  { words: ["早上", "上午"], defaultTime: "08:00", apply: (hour) => hour },
-  { words: ["中午"], defaultTime: "12:00", apply: (hour) => hour },
-  // 饭点本身就是时间线索：「刚吃完午饭」没有钟点，但能推断到 12:00。
-  // 放在「下午/傍晚/晚上」之前，这样「晚上吃晚饭」优先按 18:00 而不是 20:00 理解。
-  { words: ["早饭", "早餐"], defaultTime: "08:00", apply: (hour) => hour },
-  { words: ["午饭", "午餐"], defaultTime: "12:00", apply: (hour) => hour },
-  { words: ["晚饭", "晚餐"], defaultTime: "18:00", apply: (hour) => hour },
-  { words: ["下午"], defaultTime: "15:00", apply: (hour) => (hour < 12 ? hour + 12 : hour) },
-  { words: ["傍晚"], defaultTime: "18:00", apply: (hour) => (hour < 12 ? hour + 12 : hour) },
-  // 晚上/夜里：1-11 点按下午处理（+12）；12 点即午夜，归 0（对应「夜里12点 → 00:00」）
-  { words: ["晚上", "夜里"], defaultTime: "20:00", apply: (hour) => (hour === 12 ? 0 : hour < 12 ? hour + 12 : hour) },
-];
-
-function detectLifeEventPeriod(text) {
-  return lifeEventPeriods.find((period) => period.words.some((word) => text.includes(word))) || null;
-}
-
-// 输出零填充 HH:MM；非法小时（>23）或分钟返回 null（不瞎猜）
-function formatClock(hour, minute) {
-  if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null;
-  if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null;
-  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
-}
-
-function inferLifeEventTime(text) {
-  const clock = extractClockTime(text);
-  const period = detectLifeEventPeriod(text);
-  if (clock) {
-    const hour = period ? period.apply(clock.hour) : clock.hour;
-    return formatClock(hour, clock.minute);
-  }
-  // 只有时段词没有钟点：用该时段的默认时间；完全没有时间信息 → null
-  return period ? period.defaultTime : null;
-}
-
-// 请求体里的 occurredAt 只在合法 HH:MM（兼容带秒）时才采信，否则交给 parseLifeEvent 推断
+// 请求体里的 occurredAt 只在合法 HH:MM（兼容带秒）时才采信，否则交给 parseLifeEvent 推断（已拆分至 src/server/domain-rules.mjs）
 function normalizeOccurredAt(value) {
   const text = String(value ?? "").trim();
   return timeOfDayPattern.test(text) ? text.slice(0, 5) : null;
@@ -1783,6 +2240,30 @@ async function deletePushSubscription(request, response, user) {
   sendJson(response, 200, { ok: true });
 }
 
+// 判断长辈今天是否已有任何活跃痕迹（报平安 / 确认吃药 / 完成任务 / 量血压 / 记生活事件）
+async function hasElderActivityToday(elderId, today) {
+  const checkin = await db
+    .prepare("SELECT id FROM alerts WHERE elder_id = ? AND type = 'safe_checkin' AND ref_id = ? LIMIT 1")
+    .get(elderId, `${elderId}-${today}`);
+  if (checkin) return true;
+  const med = await db
+    .prepare("SELECT id FROM medication_logs WHERE elder_id = ? AND due_date = ? AND status = 'done' LIMIT 1")
+    .get(elderId, today);
+  if (med) return true;
+  const task = await db
+    .prepare("SELECT id FROM care_tasks WHERE elder_id = ? AND status = 'done' AND substr(completed_at, 1, 10) = ? LIMIT 1")
+    .get(elderId, today);
+  if (task) return true;
+  const bp = await db
+    .prepare("SELECT id FROM blood_pressure_logs WHERE elder_id = ? AND (substr(measured_at, 1, 10) = ? OR substr(created_at, 1, 10) = ?) LIMIT 1")
+    .get(elderId, today, today);
+  if (bp) return true;
+  const life = await db
+    .prepare("SELECT id FROM life_events WHERE elder_id = ? AND substr(created_at, 1, 10) = ? LIMIT 1")
+    .get(elderId, today);
+  return Boolean(life);
+}
+
 async function scanReminders(request, response) {
   // 定时扫描会向家属推送通知，必须鉴权：配置了 CRON_SECRET 走 Bearer，否则只信任本机回环/Vercel Cron
   if (!isAuthorizedCronRequest(request)) {
@@ -1796,6 +2277,7 @@ async function scanReminders(request, response) {
   let taskRemindersSent = 0;
   let weatherRemindersSent = 0;
   let medicationStockRemindersSent = 0;
+  let inactivityRemindersSent = 0;
   const failedElders = [];
   for (const elder of elders) {
     // 单个长辈的数据异常（脏配置、DB 冲突等）不能中断整轮扫描：
@@ -1950,12 +2432,35 @@ async function scanReminders(request, response) {
           weatherRemindersSent += 1;
         }
       }
+
+      // 静默未活跃告警：独居老人最怕“一整天没动静”。开启开关且超过设定截止时间后，
+      // 若当日既未报平安、未确认吃药、未完成任务、未量血压也无生活记录，自动提醒家属电话确认。
+      const profile = await db.prepare("SELECT inactivity_alert_enabled, inactivity_deadline FROM elder_profiles WHERE elder_id = ?").get(elder.id);
+      if (profile && Number(profile.inactivity_alert_enabled) === 1 && nowTime >= (profile.inactivity_deadline || "12:00")) {
+        const activeToday = await hasElderActivityToday(elder.id, today);
+        if (!activeToday) {
+          const refId = `${elder.id}-${today}`;
+          const deadline = profile.inactivity_deadline || "12:00";
+          const message = `${elder.display_name} 今天截止 ${deadline} 尚无报平安、吃药确认或任何活跃记录，建议家人尽快打个电话确认平安。`;
+          const alertId = await createAlert(elder.id, "inactivity", "长辈今日尚未活跃", message, refId);
+          if (alertId) {
+            await notifyElderCaregivers(
+              elder.id,
+              "inactivity_alert",
+              "长辈今日尚未活跃",
+              message,
+              { feishuCard: buildSimpleCard("⚠️ 长辈今日尚未活跃", message) }
+            );
+            inactivityRemindersSent += 1;
+          }
+        }
+      }
     } catch (error) {
       failedElders.push(elder.id);
       console.error(`[TechGuard] 长辈 ${elder.id} 的提醒扫描失败，已跳过以免影响其他长辈：`, error?.message || error);
     }
   }
-  sendJson(response, 200, { ok: true, checkedAt: nowIso(), medicationRemindersSent, taskRemindersSent, weatherRemindersSent, medicationStockRemindersSent, failedElders });
+  sendJson(response, 200, { ok: true, checkedAt: nowIso(), medicationRemindersSent, taskRemindersSent, weatherRemindersSent, medicationStockRemindersSent, inactivityRemindersSent, failedElders });
 }
 
 async function initDatabase() {
@@ -2148,6 +2653,30 @@ async function initDatabase() {
       used_by TEXT,
       created_at TEXT NOT NULL
     );
+    -- 长辈健康急救卡 & 静默未活跃告警配置
+    CREATE TABLE IF NOT EXISTS elder_profiles (
+      elder_id TEXT PRIMARY KEY,
+      blood_type TEXT,
+      allergies TEXT,
+      chronic_conditions TEXT,
+      emergency_hospital TEXT,
+      doctor_name TEXT,
+      doctor_phone TEXT,
+      notes TEXT,
+      inactivity_alert_enabled INTEGER NOT NULL DEFAULT 0,
+      inactivity_deadline TEXT NOT NULL DEFAULT '12:00',
+      updated_at TEXT NOT NULL
+    );
+    -- 长辈免密绑定链接：24 小时有效、一次性使用，避免老人记账号密码
+    CREATE TABLE IF NOT EXISTS elder_login_links (
+      id TEXT PRIMARY KEY,
+      elder_id TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      token_hash TEXT NOT NULL UNIQUE,
+      expires_at TEXT NOT NULL,
+      used_at TEXT,
+      created_at TEXT NOT NULL
+    );
   `);
 
   // 生活事件按「长辈 + 记录时间倒序」查询（列表 / dashboard 都走这个顺序），建索引避免全表扫描
@@ -2159,9 +2688,15 @@ async function initDatabase() {
   // 邀请按长辈查询（列表 / 删除校验），接受时按 token_hash 查，都建索引避免全表扫描
   await db.exec("CREATE INDEX IF NOT EXISTS idx_elder_invites_elder ON elder_invites (elder_id)");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_elder_invites_token_hash ON elder_invites (token_hash)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_elder_login_links_token_hash ON elder_login_links (token_hash)");
 
   await ensureColumn("notification_preferences", "task_due", "INTEGER NOT NULL DEFAULT 1");
   await ensureColumn("notification_preferences", "safe_checkin", "INTEGER NOT NULL DEFAULT 1");
+  await ensureColumn("notification_preferences", "inactivity_alert", "INTEGER NOT NULL DEFAULT 1");
+  // 用药周期与疗程日期：支持隔日、每周固定日与短期疗程
+  await ensureColumn("medication_schedules", "repeat_days", "TEXT");
+  await ensureColumn("medication_schedules", "start_date", "TEXT");
+  await ensureColumn("medication_schedules", "end_date", "TEXT");
   // 联系电话（紧急联系人拨号兜底）与「当前照护长辈」都挂在 users 上：老库需要补列，ensureColumn 保证幂等
   await ensureColumn("users", "phone", "TEXT");
   await ensureColumn("users", "active_elder_id", "TEXT");
@@ -2192,18 +2727,30 @@ async function initDatabase() {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_push_subscriptions_endpoint ON push_subscriptions (endpoint);
   `);
 
-  await seedUser(defaultCaregiverId, "caregiver", "demo1234", "家属账号", "caregiver");
-  await seedUser(defaultElderId, "elder", "demo1234", "长辈账号", "elder");
-  const link = await db.prepare("SELECT id FROM family_links WHERE caregiver_id = ? AND elder_id = ?").get(defaultCaregiverId, defaultElderId);
-  if (!link) {
-    await db.prepare("INSERT INTO family_links (id, caregiver_id, elder_id, relation) VALUES (?, ?, ?, ?)").run("link-demo-family", defaultCaregiverId, defaultElderId, "家属");
+  // 清理历史过期会话，避免 auth_sessions 长期只增不减
+  await db.prepare("DELETE FROM auth_sessions WHERE expires_at <= ?").run(nowIso());
+
+  // 生产环境（NODE_ENV=production 或 VERCEL）默认不种入弱口令演示账号，
+  // 除非显式设置 ENABLE_DEMO_SEED=1；本地开发与测试环境保持自动种入。
+  if (shouldSeedDemoAccounts()) {
+    await seedUser(defaultCaregiverId, "caregiver", "demo1234", "家属账号", "caregiver");
+    await seedUser(defaultElderId, "elder", "demo1234", "长辈账号", "elder");
+    const link = await db.prepare("SELECT id FROM family_links WHERE caregiver_id = ? AND elder_id = ?").get(defaultCaregiverId, defaultElderId);
+    if (!link) {
+      await db.prepare("INSERT INTO family_links (id, caregiver_id, elder_id, relation) VALUES (?, ?, ?, ?)").run("link-demo-family", defaultCaregiverId, defaultElderId, "家属");
+    }
+    // 第二个演示长辈：同样只在不存在时创建，且不给它建任何用药计划，保持 dashboard 空状态
+    await seedUser(defaultElder2Id, "elder2", "demo1234", "长辈账号2", "elder");
+    const link2 = await db.prepare("SELECT id FROM family_links WHERE caregiver_id = ? AND elder_id = ?").get(defaultCaregiverId, defaultElder2Id);
+    if (!link2) {
+      await db.prepare("INSERT INTO family_links (id, caregiver_id, elder_id, relation) VALUES (?, ?, ?, ?)").run("link-demo-family2", defaultCaregiverId, defaultElder2Id, "家属");
+    }
   }
-  // 第二个演示长辈：同样只在不存在时创建，且不给它建任何用药计划，保持 dashboard 空状态
-  await seedUser(defaultElder2Id, "elder2", "demo1234", "长辈账号2", "elder");
-  const link2 = await db.prepare("SELECT id FROM family_links WHERE caregiver_id = ? AND elder_id = ?").get(defaultCaregiverId, defaultElder2Id);
-  if (!link2) {
-    await db.prepare("INSERT INTO family_links (id, caregiver_id, elder_id, relation) VALUES (?, ?, ?, ?)").run("link-demo-family2", defaultCaregiverId, defaultElder2Id, "家属");
-  }
+}
+
+export function shouldSeedDemoAccounts(env = process.env) {
+  const isProduction = env.NODE_ENV === "production" || Boolean(env.VERCEL);
+  return !isProduction || env.ENABLE_DEMO_SEED === "1";
 }
 
 async function ensureColumn(table, column, definition) {
@@ -2310,6 +2857,7 @@ async function ensureTodayMedicationLogs(elderId) {
   await db.prepare("UPDATE medication_logs SET status = 'missed' WHERE elder_id = ? AND due_date < ? AND status = 'pending'").run(elderId, today);
   const schedules = await db.prepare("SELECT * FROM medication_schedules WHERE elder_id = ? AND enabled = 1").all(elderId);
   for (const schedule of schedules) {
+    if (!isMedicationDueOnDate(schedule, today)) continue;
     const id = `${schedule.id}-${today}`;
     await db.prepare("INSERT OR IGNORE INTO medication_logs (id, schedule_id, elder_id, due_date, status) VALUES (?, ?, ?, ?, 'pending')").run(id, schedule.id, elderId, today);
   }
@@ -2347,12 +2895,30 @@ async function createAlert(elderId, type, title, message, refId = null) {
   return changes > 0 ? id : null;
 }
 
-async function sendFeishu(user, text) {
-  const row = await db.prepare("SELECT config_json FROM notification_channels WHERE owner_id = ? AND channel_type = 'feishu' AND enabled = 1").get(user.role === "caregiver" ? user.id : defaultCaregiverId);
+// 多家庭隔离：只有单家庭/默认演示账号，或显式开启 FEISHU_ALLOW_GLOBAL_FALLBACK=1 时，
+// 才允许回落到全局环境变量里的飞书 Webhook / App 群，避免 B 家的老人告警串发到管理员或 A 家群。
+function canUseGlobalFeishuFallback(user) {
+  return user?.id === defaultCaregiverId || process.env.FEISHU_ALLOW_GLOBAL_FALLBACK === "1";
+}
+
+async function resolveCaregiverFeishuWebhook(user) {
+  if (user?.role !== "caregiver") return { webhook: "", allowAppFallback: false };
+  const row = await db
+    .prepare("SELECT config_json FROM notification_channels WHERE owner_id = ? AND channel_type = 'feishu' AND enabled = 1")
+    .get(user.id);
   const configured = row ? JSON.parse(row.config_json).webhook : "";
-  const webhook = configured || feishuWebhookUrl;
+  if (configured) return { webhook: configured, allowAppFallback: false };
+  if (canUseGlobalFeishuFallback(user)) {
+    return { webhook: feishuWebhookUrl, allowAppFallback: true };
+  }
+  return { webhook: "", allowAppFallback: false };
+}
+
+async function sendFeishu(user, text) {
+  const { webhook, allowAppFallback } = await resolveCaregiverFeishuWebhook(user);
   if (webhook) return postFeishu(webhook, text);
-  return postFeishuAppMessage("text", { text });
+  if (allowAppFallback) return postFeishuAppMessage("text", { text });
+  return { ok: false, message: "当前家属尚未配置飞书 Webhook" };
 }
 
 async function postFeishu(webhook, text) {
@@ -2373,11 +2939,10 @@ async function postFeishu(webhook, text) {
 }
 
 async function sendFeishuCard(user, card) {
-  const row = await db.prepare("SELECT config_json FROM notification_channels WHERE owner_id = ? AND channel_type = 'feishu' AND enabled = 1").get(user.role === "caregiver" ? user.id : defaultCaregiverId);
-  const configured = row ? JSON.parse(row.config_json).webhook : "";
-  const webhook = configured || feishuWebhookUrl;
+  const { webhook, allowAppFallback } = await resolveCaregiverFeishuWebhook(user);
   if (webhook) return postFeishuCard(webhook, card);
-  return postFeishuAppMessage("interactive", card);
+  if (allowAppFallback) return postFeishuAppMessage("interactive", card);
+  return { ok: false, message: "当前家属尚未配置飞书 Webhook" };
 }
 
 async function postFeishuCard(webhook, card) {
@@ -2478,8 +3043,8 @@ function buildBloodPressureCard(elder, summary, bpText, note) {
 async function getNotificationPreferences(userId) {
   const row = await db.prepare("SELECT * FROM notification_preferences WHERE user_id = ?").get(userId);
   if (row) return row;
-  const defaults = { user_id: userId, task_assigned: 1, task_due: 1, task_completed: 1, medication_completed: 1, blood_pressure_recorded: 1, blood_pressure_abnormal: 1, help_requested: 1, safe_checkin: 1, feishu_enabled: 1, updated_at: nowIso() };
-  await db.prepare("INSERT INTO notification_preferences (user_id, task_assigned, task_due, task_completed, medication_completed, blood_pressure_recorded, blood_pressure_abnormal, help_requested, safe_checkin, feishu_enabled, updated_at) VALUES (?, 1, 1, 1, 1, 1, 1, 1, 1, 1, ?)").run(userId, defaults.updated_at);
+  const defaults = { user_id: userId, task_assigned: 1, task_due: 1, task_completed: 1, medication_completed: 1, blood_pressure_recorded: 1, blood_pressure_abnormal: 1, help_requested: 1, safe_checkin: 1, inactivity_alert: 1, feishu_enabled: 1, updated_at: nowIso() };
+  await db.prepare("INSERT INTO notification_preferences (user_id, task_assigned, task_due, task_completed, medication_completed, blood_pressure_recorded, blood_pressure_abnormal, help_requested, safe_checkin, inactivity_alert, feishu_enabled, updated_at) VALUES (?, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, ?)").run(userId, defaults.updated_at);
   return defaults;
 }
 
@@ -2494,11 +3059,30 @@ async function notifyCaregiver(caregiver, type, title, body, options = {}) {
   const prefKey = type;
   if (prefs[prefKey] === 0) return { ok: false, message: "通知已关闭" };
   await createNotification(caregiver.id, type, title, body);
-  if (prefs.feishu_enabled === 0) return { ok: false, message: "飞书通知已关闭" };
-  if (options.feishuCard) {
-    return sendFeishuCard(caregiver, options.feishuCard);
+
+  // 多通道分发：企业微信 / 钉钉（各自独立配置即生效），以及飞书（受 feishu_enabled 控制）
+  const extraRows = await db
+    .prepare("SELECT channel_type, config_json FROM notification_channels WHERE owner_id = ? AND channel_type IN ('wecom', 'dingtalk') AND enabled = 1")
+    .all(caregiver.id);
+  const extraResults = [];
+  for (const row of extraRows) {
+    const webhook = JSON.parse(row.config_json || "{}").webhook || "";
+    if (!webhook) continue;
+    extraResults.push(await postWebhookChannel(row.channel_type, webhook, { title, body }, fetchWithTimeout));
   }
-  return sendFeishu(caregiver, `${title}\n${body}`);
+
+  // 高危紧急事件（一键求助 / 静默未活跃 / 异常血压 / 高危防骗）支持可选短信/语音外呼网关兜底
+  if (caregiver.phone) {
+    await dispatchUrgentSmsGateway({ phone: caregiver.phone, type, title, body }, fetchWithTimeout);
+  }
+
+  if (prefs.feishu_enabled === 0) {
+    return extraResults.find((item) => item.ok) || { ok: false, message: "飞书通知已关闭" };
+  }
+  const feishuResult = options.feishuCard
+    ? await sendFeishuCard(caregiver, options.feishuCard)
+    : await sendFeishu(caregiver, `${title}\n${body}`);
+  return feishuResult.ok ? feishuResult : extraResults.find((item) => item.ok) || feishuResult;
 }
 
 // 提醒应该发给「真正在照护这位长辈」的家属。原来所有通知都写死发给 defaultCaregiverId，
@@ -2508,7 +3092,7 @@ async function notifyCaregiver(caregiver, type, title, body, options = {}) {
 async function caregiversForElder(elderId) {
   const rows = await db
     .prepare(
-      `SELECT u.id, u.role FROM family_links fl JOIN users u ON u.id = fl.caregiver_id
+      `SELECT u.id, u.role, u.phone FROM family_links fl JOIN users u ON u.id = fl.caregiver_id
        WHERE fl.elder_id = ?
        GROUP BY u.id`
     )
@@ -2592,14 +3176,14 @@ async function markNotificationRead(request, response, user) {
 async function saveNotificationPreferences(request, response, user) {
   const body = await readJson(request);
   const prefs = await getNotificationPreferences(user.id);
-  const fields = ["task_assigned", "task_due", "task_completed", "medication_completed", "blood_pressure_recorded", "blood_pressure_abnormal", "help_requested", "safe_checkin", "feishu_enabled"];
+  const fields = ["task_assigned", "task_due", "task_completed", "medication_completed", "blood_pressure_recorded", "blood_pressure_abnormal", "help_requested", "safe_checkin", "inactivity_alert", "feishu_enabled"];
   const updates = {};
   for (const field of fields) {
     if (body[field] !== undefined) updates[field] = body[field] ? 1 : 0;
   }
   await db.prepare(
-    `INSERT INTO notification_preferences (user_id, task_assigned, task_due, task_completed, medication_completed, blood_pressure_recorded, blood_pressure_abnormal, help_requested, safe_checkin, feishu_enabled, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO notification_preferences (user_id, task_assigned, task_due, task_completed, medication_completed, blood_pressure_recorded, blood_pressure_abnormal, help_requested, safe_checkin, inactivity_alert, feishu_enabled, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(user_id) DO UPDATE SET ${Object.keys(updates).length ? Object.keys(updates).map((k) => `${k} = excluded.${k}`).join(", ") + ", " : ""}updated_at = excluded.updated_at`
   ).run(
     user.id,
@@ -2611,42 +3195,14 @@ async function saveNotificationPreferences(request, response, user) {
     updates.blood_pressure_abnormal ?? prefs.blood_pressure_abnormal,
     updates.help_requested ?? prefs.help_requested,
     updates.safe_checkin ?? prefs.safe_checkin,
+    updates.inactivity_alert ?? prefs.inactivity_alert ?? 1,
     updates.feishu_enabled ?? prefs.feishu_enabled,
     nowIso()
   );
   sendJson(response, 200, { ok: true, preferences: await getNotificationPreferences(user.id) });
 }
 
-function analyzeFraud(text) {
-  const rules = [
-    ["出现陌生链接", 25, /(https?:\/\/|www\.|\.icu|\.top|\.xyz|\.click|链接|网址)/i],
-    ["要求提供或回复验证码", 30, /(验证码|校验码|动态码|短信码|回复.*码)/],
-    ["冒充官方机构", 20, /(社保|银行|公安|法院|检察院|医保|税务|客服|官方|中心)/],
-    ["制造紧急压力", 15, /(立即|马上|冻结|异常|逾期|通缉|涉案|失效|停用|解冻)/],
-    ["涉及资金或账户损失", 20, /(元|账户|消费|转账|汇款|手续费|安全账户|银行卡|余额|支付)/],
-    ["存在中奖或补贴诱导", 18, /(中奖|大奖|补贴|退税|领取|返现|福利)/],
-  ];
-  const matched = rules.filter(([, , pattern]) => pattern.test(text));
-  const score = Math.min(100, matched.reduce((sum, [, value]) => sum + value, 0));
-  return {
-    score,
-    level: score >= 80 ? "高危诈骗" : score >= 41 ? "中风险可疑信息" : "低风险信息",
-    type: inferFraudType(text),
-    reasons: matched.map(([name]) => name),
-    reply_for_elder:
-      score >= 80
-        ? "奶奶，这条信息很像骗子发来的，千万别点链接，也不要回复验证码。我已经提醒家人了。"
-        : "奶奶，这条信息先别急着操作，可以让家属帮您看一眼。",
-  };
-}
-
-function inferFraudType(text) {
-  if (/社保|医保/.test(text)) return "冒充社保或医保诈骗";
-  if (/银行|账户|银行卡/.test(text)) return "冒充银行诈骗";
-  if (/公安|法院|检察院|通缉|涉案/.test(text)) return "冒充公检法诈骗";
-  if (/中奖|大奖|手续费/.test(text)) return "中奖领奖诈骗";
-  return "疑似电信网络诈骗";
-}
+// 防骗规则已拆分至 src/server/domain-rules.mjs（analyzeFraud / inferFraudType）
 
 async function buildWeatherCare(weather) {
   if (!weather) {
@@ -2680,19 +3236,7 @@ async function buildWeatherCare(weather) {
   };
 }
 
-// 拿不到实时天气时的兜底。这里**绝不能编一句「今天天气整体平稳」**——老人会把它当成
-// 事实信。原来的实现只按城市名硬编码猜（上海/杭州/苏州/南京 一律「可能有雨」，其余
-// 一律「整体平稳」），跟当天真实天气毫无关系，而且界面上看不出和实时数据有任何差别。
-// 现在明确说清「取不到」，并给一个老人自己能做的判断方法；同时不谎报严重程度。
-export function buildFallbackWeatherCare(weather) {
-  const location = `${weather.city}${weather.district || ""}`;
-  return {
-    text: `${location}的实时天气暂时取不到（网络或天气服务不可用）。出门前自己看一眼窗外：下雨就带伞，觉得冷就多穿一件。`,
-    severe: false,
-    source: "local-fallback",
-  };
-}
-
+// buildFallbackWeatherCare / weatherGeocodeCandidates / weatherCodeLabel 已拆分至 src/server/domain-rules.mjs
 async function fetchWeatherNow(weather) {
   try {
     const place = await geocodeWeatherLocation(weather);
@@ -2715,34 +3259,6 @@ async function fetchWeatherNow(weather) {
   } catch {
     return null;
   }
-}
-
-// Open-Meteo 的地理编码对中文行政区后缀很敏感：「北京市」查不到、「北京」能查到；
-// 「朝阳区」也查不到。家属按日常习惯填「北京市朝阳区」时，如果只按原样查，
-// 会静默降级成兜底文案（那句「天气整体平稳」其实是按城市名猜的硬编码），
-// 而界面上完全看不出差别——这是最糟的一种失败。
-//
-// 因此额外尝试去掉「市/省」后缀的城市名。注意候选一律以「城市」为锚点：
-// 绝不能拿「朝阳」这种裸区名去查——它会命中辽宁省朝阳市，变成另一个城市的天气。
-// 宁可只到城市级（北京），也不能报到别的城市。
-export function weatherGeocodeCandidates(weather) {
-  const stripSuffix = (text, suffixes) => {
-    const trimmed = String(text || "").trim();
-    for (const suffix of suffixes) {
-      if (trimmed.length > suffix.length && trimmed.endsWith(suffix)) return trimmed.slice(0, -suffix.length);
-    }
-    return "";
-  };
-  const city = String(weather?.city || "").trim();
-  const district = String(weather?.district || "").trim();
-  const cityBare = stripSuffix(city, ["特别行政区", "自治区", "市", "省"]);
-  const candidates = [
-    `${city}${district}`,
-    city,
-    cityBare ? `${cityBare}${district}` : "",
-    cityBare,
-  ];
-  return [...new Set(candidates.filter(Boolean))];
 }
 
 async function geocodeWeatherLocation(weather) {
@@ -2773,17 +3289,6 @@ async function fetchJsonWithTimeout(url, timeoutMs) {
   const response = await fetchWithTimeout(url, {}, timeoutMs);
   if (!response.ok) throw new Error(`Weather request failed: ${response.status}`);
   return await response.json();
-}
-
-function weatherCodeLabel(code) {
-  if (code === 0) return "晴朗";
-  if ([1, 2, 3].includes(code)) return "多云";
-  if ([45, 48].includes(code)) return "有雾";
-  if (code >= 51 && code <= 67) return "有雨";
-  if (code >= 71 && code <= 77) return "有雪";
-  if (code >= 80 && code <= 82) return "有阵雨";
-  if (code >= 95 && code <= 99) return "有雷雨";
-  return "天气平稳";
 }
 
 function inferDestination(query) {
@@ -3001,73 +3506,7 @@ function formatDuration(seconds) {
   return `${Math.floor(minutes / 60)}小时${minutes % 60}分钟`;
 }
 
-function analyzeBloodPressure(logs) {
-  if (!logs.length) {
-    return {
-      level: "empty",
-      label: "还没有记录",
-      advice: "量完血压后记在这里，我会帮您看今天有没有需要留意的变化。",
-      latest: null,
-      trend: "none",
-    };
-  }
-
-  const latest = logs[logs.length - 1];
-  const recent = logs.slice(-7);
-  const avgSystolic = Math.round(recent.reduce((sum, item) => sum + item.systolic, 0) / recent.length);
-  const avgDiastolic = Math.round(recent.reduce((sum, item) => sum + item.diastolic, 0) / recent.length);
-  const previous = logs.length > 1 ? logs[logs.length - 2] : null;
-  const trend =
-    previous && latest.systolic - previous.systolic >= 8
-      ? "up"
-      : previous && previous.systolic - latest.systolic >= 8
-        ? "down"
-        : "stable";
-
-  if (latest.systolic >= 180 || latest.diastolic >= 120) {
-    return {
-      level: "danger",
-      label: "明显偏高",
-      advice: "这次数值很高，请先坐下休息并尽快联系家人；如果伴随胸闷、头痛、气短或不舒服，请立即就医。",
-      latest,
-      avgSystolic,
-      avgDiastolic,
-      trend,
-    };
-  }
-  if (latest.systolic >= 140 || latest.diastolic >= 90) {
-    return {
-      level: "warning",
-      label: "偏高",
-      advice: "这次数值偏高，建议安静休息 5 分钟后复测一次，并把结果告诉家人或医生。",
-      latest,
-      avgSystolic,
-      avgDiastolic,
-      trend,
-    };
-  }
-  if (latest.systolic < 90 || latest.diastolic < 60) {
-    return {
-      level: "warning",
-      label: "偏低",
-      advice: "这次数值偏低，起身请慢一点；如果头晕、乏力或站不稳，请联系家人。",
-      latest,
-      avgSystolic,
-      avgDiastolic,
-      trend,
-    };
-  }
-  return {
-    level: "safe",
-    label: "平稳",
-    advice: trend === "up" ? "这次数值在可接受范围内，但比上次高了一些，建议继续观察。" : "这次数值暂未发现明显异常，继续按医生建议规律记录。",
-    latest,
-    avgSystolic,
-    avgDiastolic,
-    trend,
-  };
-}
-
+// analyzeBloodPressure 已拆分至 src/server/domain-rules.mjs
 async function generateCheckupAdvice({ elder, imageData, fileName }) {
   const fallback = {
     summary: "已收到体检报告照片。当前未启用图片智能分析，请让家人或医生帮忙核对报告里的异常标记。",
@@ -3327,6 +3766,7 @@ function checkLoginRateLimit(username, ip) {
 }
 
 function recordLoginFailure(username, ip) {
+  pruneRateLimitMap(loginFailures);
   const key = `${username}|${ip}`;
   const entry = loginFailures.get(key) || { count: 0, lockedUntil: 0 };
   entry.count += 1;

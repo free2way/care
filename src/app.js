@@ -495,7 +495,7 @@ const copy = {
     stockPerDoseLabel: "每次吃几片",
     stockNeedUnits: "请填写剩余数量。",
     confirmDeleteStock: "停止追踪这个药的剩余数量？已登记的库存会被删除，之后的吃药确认不再扣减。",
-    indicatorOutOfRange: "偏高",
+    indicatorOutOfRange: "超出范围",
     indicatorInRange: "正常",
     indicatorRefLabel: "参考范围：",
     indicatorEmpty: "还没有录入指标。点上面的「添加指标」，照着体检报告把关键数字填进来。",
@@ -511,6 +511,11 @@ const copy = {
     visitSectionAdherence: "三、用药完成情况",
     visitSectionUnwell: "四、身体不适记录",
     visitSectionCheckup: "五、体检报告要点",
+    visitSectionIndicators: "六、关键体检指标趋势",
+    visitIndicatorName: "指标",
+    visitIndicatorLatest: "最近数值",
+    visitIndicatorRef: "参考范围",
+    visitIndicatorTrend: "较上次变化",
     visitTime: "时间",
     visitMedicine: "药品",
     visitDose: "用法用量",
@@ -769,6 +774,11 @@ const copy = {
     visitSectionAdherence: "3. Medication adherence",
     visitSectionUnwell: "4. Reported discomfort",
     visitSectionCheckup: "5. Checkup report highlights",
+    visitSectionIndicators: "6. Key lab indicator trends",
+    visitIndicatorName: "Indicator",
+    visitIndicatorLatest: "Latest",
+    visitIndicatorRef: "Reference",
+    visitIndicatorTrend: "Change",
     visitTime: "Time",
     visitMedicine: "Medicine",
     visitDose: "Dose",
@@ -1095,6 +1105,15 @@ function renderIndicatorSparkline(history) {
   </svg>`;
 }
 
+function formatIndicatorRange(refLow, refHigh) {
+  if (refLow !== null && refLow !== undefined && refHigh !== null && refHigh !== undefined) {
+    return `${refLow} – ${refHigh}`;
+  }
+  if (refLow !== null && refLow !== undefined) return `≥ ${refLow}`;
+  if (refHigh !== null && refHigh !== undefined) return `≤ ${refHigh}`;
+  return "";
+}
+
 function renderIndicators(items) {
   if (!els.indicatorList) return;
   const c = activeCopy();
@@ -1116,14 +1135,7 @@ function renderIndicators(items) {
         item.delta === null || item.delta === undefined
           ? ""
           : `${item.delta > 0 ? "↑" : item.delta < 0 ? "↓" : "→"} ${Math.abs(item.delta)}`;
-      const refText =
-        item.refLow !== null && item.refHigh !== null
-          ? `${item.refLow} – ${item.refHigh}`
-          : item.refLow !== null
-            ? `≥ ${item.refLow}`
-            : item.refHigh !== null
-              ? `≤ ${item.refHigh}`
-              : "—";
+      const refText = formatIndicatorRange(item.refLow, item.refHigh) || "—";
       const historyRows = (item.history || [])
         .slice()
         .reverse()
@@ -1379,6 +1391,15 @@ function renderVisitSummary(data) {
   const medications = data.medications || [];
   const unwell = data.unwellEvents || [];
   const checkups = data.checkups || [];
+  const indicators = data.indicators || [];
+  const ep = data.elderProfile || {};
+  const profileSummaryParts = [
+    ep.bloodType ? `血型：${ep.bloodType}` : "",
+    ep.allergies ? `过敏史：${ep.allergies}` : "",
+    ep.chronicConditions ? `慢病史：${ep.chronicConditions}` : "",
+    ep.emergencyHospital ? `常用医院：${ep.emergencyHospital}` : "",
+    ep.doctorName ? `主治医生：${ep.doctorName}${ep.doctorPhone ? `（${ep.doctorPhone}）` : ""}` : "",
+  ].filter(Boolean);
 
   const medRows = medications.length
     ? medications
@@ -1408,10 +1429,32 @@ function renderVisitSummary(data) {
     )
     .join("");
 
+  const indicatorRows = indicators
+    .map((item) => {
+      const latest = item.latest || {};
+      const unit = latest.unit || item.unit || "";
+      const refText = formatIndicatorRange(item.refLow, item.refHigh);
+      const flag = item.outOfRange === true ? `（${c.indicatorOutOfRange}）` : "";
+      const deltaText =
+        item.delta === null || item.delta === undefined
+          ? "—"
+          : item.delta === 0
+            ? "0"
+            : `${item.delta > 0 ? "↑" : "↓"} ${Math.abs(item.delta)}`;
+      return `<tr>
+        <td>${escapeHtml(indicatorLabel(item.name))}</td>
+        <td>${escapeHtml(`${latest.value ?? "—"}${unit ? ` ${unit}` : ""}${flag}`)}<small>（${escapeHtml(formatDayLabel(latest.measuredDate))}）</small></td>
+        <td>${escapeHtml(refText ? `${refText}${item.unit ? ` ${item.unit}` : ""}` : "—")}</td>
+        <td>${escapeHtml(deltaText)}</td>
+      </tr>`;
+    })
+    .join("");
+
   els.visitSheet.innerHTML = `
     <header class="sheet-head">
       <h2>${escapeHtml(c.visitTitle)}</h2>
       <p>${escapeHtml(data.elder?.displayName || "")}　|　${escapeHtml(c.visitPeriod(data.periodDays, data.periodStart))}　|　${escapeHtml(c.visitGenerated(formatTime(data.generatedAt)))}</p>
+      ${profileSummaryParts.length ? `<p class="sheet-profile">${escapeHtml(profileSummaryParts.join("　|　"))}</p>` : ""}
     </header>
 
     <h3>${escapeHtml(c.visitSectionMedication)}</h3>
@@ -1443,6 +1486,9 @@ function renderVisitSummary(data) {
 
     <h3>${escapeHtml(c.visitSectionCheckup)}</h3>
     ${checkupBlocks ? `<ul class="sheet-list">${checkupBlocks}</ul>` : `<p class="muted">${escapeHtml(c.visitNone)}</p>`}
+
+    <h3>${escapeHtml(c.visitSectionIndicators)}</h3>
+    ${indicatorRows ? `<table class="sheet-table"><thead><tr><th>${escapeHtml(c.visitIndicatorName)}</th><th>${escapeHtml(c.visitIndicatorLatest)}</th><th>${escapeHtml(c.visitIndicatorRef)}</th><th>${escapeHtml(c.visitIndicatorTrend)}</th></tr></thead><tbody>${indicatorRows}</tbody></table>` : `<p class="muted">${escapeHtml(c.visitNone)}</p>`}
 
     <footer class="sheet-foot">${escapeHtml(c.visitFooter)}</footer>
   `;
@@ -1775,25 +1821,64 @@ document.querySelector("#loadTravelSample").addEventListener("click", () => {
   logEvent("已填入出行帮助示例。");
 });
 
-document.querySelector("#analyzeFraud").addEventListener("click", async () => {
-  const text = els.fraudInput.value.trim();
-  if (!text) {
-    setElderReply("奶奶，您先把可疑短信复制后粘贴到这里，我帮您看看。");
+let pendingFraudImageData = "";
+const fraudImageInput = document.querySelector("#fraudImageInput");
+const fraudImageName = document.querySelector("#fraudImageName");
+const fraudSourceNote = document.querySelector("#fraudSourceNote");
+
+fraudImageInput?.addEventListener("change", () => {
+  const file = fraudImageInput.files?.[0];
+  if (!file) {
+    pendingFraudImageData = "";
+    if (fraudImageName) fraudImageName.textContent = "支持直接截图上传，不用自己打字或复制。";
     return;
   }
-  const { result } = await api("/api/fraud/check", { method: "POST", body: { text } });
-  renderFraudResult(result);
-  logEvent(result.score >= 80 ? `短信识别：高危，评分 ${result.score}。` : `短信识别：评分 ${result.score}。`);
-  await loadDashboard();
+  const reader = new FileReader();
+  reader.onload = () => {
+    pendingFraudImageData = String(reader.result || "");
+    if (fraudImageName) fraudImageName.textContent = `已选择截图：${file.name}`;
+  };
+  reader.readAsDataURL(file);
+});
+
+document.querySelector("#analyzeFraud").addEventListener("click", async () => {
+  const text = els.fraudInput.value.trim();
+  if (!text && !pendingFraudImageData) {
+    setElderReply("请先粘贴可疑短信，或者上传一张可疑聊天/短信截图，我帮您看看。");
+    return;
+  }
+  try {
+    const { result } = await api("/api/fraud/check", {
+      method: "POST",
+      body: { text, imageData: pendingFraudImageData || undefined },
+    });
+    renderFraudResult(result);
+    if (fraudSourceNote) {
+      if (result.source === "local-fallback") {
+        fraudSourceNote.textContent = "提示：当前未启用图片智能识别，请以家人人工核对为准。";
+        fraudSourceNote.classList.remove("is-hidden");
+      } else {
+        fraudSourceNote.classList.add("is-hidden");
+      }
+    }
+    logEvent(result.score >= 80 ? `防骗识别：高危，评分 ${result.score}。` : `防骗识别：评分 ${result.score}。`);
+    await loadDashboard();
+  } catch (error) {
+    setElderReply(error.message || "检测失败，请稍后再试。");
+  }
 });
 
 document.querySelector("#clearFraud").addEventListener("click", () => {
   els.fraudInput.value = "";
+  pendingFraudImageData = "";
+  if (fraudImageInput) fraudImageInput.value = "";
+  if (fraudImageName) fraudImageName.textContent = "支持直接截图上传，不用自己打字或复制。";
+  if (fraudSourceNote) fraudSourceNote.classList.add("is-hidden");
   els.fraudScore.textContent = "--";
   els.fraudMeter.style.width = "0%";
   els.fraudLevel.textContent = "等待检测";
   els.riskReasons.innerHTML = "<li>暂无检测结果</li>";
-  setElderReply("复制短信后粘贴到这里，小护会用简单的话说明风险。");
+  setElderReply("输入内容或上传截图后，小护会用简单的话说明风险。");
 });
 
 /* 家属端吃药提醒：一次可以保存多个用药时间，不用同一张表单反复填。 */
@@ -1852,9 +1937,25 @@ els.medicineTime?.addEventListener("change", () => {
 
 renderMedicineTimeChips();
 
+const medicineRepeatRuleEl = document.querySelector("#medicineRepeatRule");
+const medicineRepeatDaysEl = document.querySelector("#medicineRepeatDays");
+const medicineStartDateEl = document.querySelector("#medicineStartDate");
+const medicineEndDateEl = document.querySelector("#medicineEndDate");
+const taskRepeatRuleEl = document.querySelector("#taskRepeatRule");
+
+medicineRepeatRuleEl?.addEventListener("change", () => {
+  medicineRepeatDaysEl?.classList.toggle("is-hidden", medicineRepeatRuleEl.value !== "weekly");
+});
+
 document.querySelector("#addMedicineSchedule").addEventListener("click", async () => {
   const medicineName = els.medicineName.value.trim();
   const times = Array.from(selectedMedicineTimes).sort();
+  const repeatRule = medicineRepeatRuleEl?.value || "daily";
+  const repeatDays = repeatRule === "weekly"
+    ? Array.from(medicineRepeatDaysEl?.querySelectorAll("input:checked") || []).map((el) => el.value).join(",")
+    : "";
+  const startDate = medicineStartDateEl?.value || "";
+  const endDate = medicineEndDateEl?.value || "";
   if (!medicineName) {
     updateSendStatus(activeCopy().needMedicineName, "warning");
     return;
@@ -1863,15 +1964,32 @@ document.querySelector("#addMedicineSchedule").addEventListener("click", async (
     updateSendStatus(activeCopy().needMedicineTime, "warning");
     return;
   }
+  if (repeatRule === "weekly" && !repeatDays) {
+    updateSendStatus("每周固定日用药请至少勾选一天。", "warning");
+    return;
+  }
   try {
     for (const timeOfDay of times) {
       await api("/api/medications", {
         method: "POST",
-        body: { medicineName, timeOfDay, doseNote: els.medicineDose.value.trim() },
+        body: {
+          medicineName,
+          timeOfDay,
+          doseNote: els.medicineDose.value.trim(),
+          repeatRule,
+          repeatDays,
+          startDate: startDate || undefined,
+          endDate: endDate || undefined,
+        },
       });
     }
     els.medicineName.value = "";
     els.medicineDose.value = "";
+    if (medicineRepeatRuleEl) medicineRepeatRuleEl.value = "daily";
+    medicineRepeatDaysEl?.classList.add("is-hidden");
+    medicineRepeatDaysEl?.querySelectorAll("input").forEach((el) => { el.checked = false; });
+    if (medicineStartDateEl) medicineStartDateEl.value = "";
+    if (medicineEndDateEl) medicineEndDateEl.value = "";
     selectedMedicineTimes.clear();
     renderMedicineTimeChips();
     logEvent(`吃药安排：${medicineName} 已保存 ${times.length} 个时间。`);
@@ -1914,10 +2032,12 @@ document.querySelector("#addTask").addEventListener("click", async () => {
         description: els.taskDescription.value.trim(),
         dueDate: els.taskDate.value || todayDate(),
         dueTime: els.taskTime.value || "09:00",
+        repeatRule: taskRepeatRuleEl?.value || "none",
       },
     });
     els.taskTitle.value = "";
     els.taskDescription.value = "";
+    if (taskRepeatRuleEl) taskRepeatRuleEl.value = "none";
     logEvent("任务安排：已保存。");
     await loadDashboard();
   } catch (error) {
@@ -2264,6 +2384,7 @@ function renderDashboard(data) {
   loadMedicationStock();
   loadIndicators();
   loadInvites();
+  loadNotificationChannels();
   // 登录后要立刻拉一次通知：只靠 30 秒轮询的话，家属登录后头 30 秒看不到告警铃和未读数。
   loadNotifications();
   renderTasks(data.tasks);
@@ -2278,6 +2399,7 @@ function renderDashboard(data) {
   renderLifeEvents(data.lifeEvents || []);
   renderDailySummary(data);
   renderEmergencyContacts(data.emergencyContacts || []);
+  renderElderProfile(data.elderProfile || null);
   renderElderSwitcher(data.elders || []);
   renderCaregiverPhone(data.user);
   if (!visitSummaryLoaded) loadVisitSummary();
@@ -3339,7 +3461,7 @@ function renderCheckups(items) {
       <article class="report-item">
         <strong>${escapeHtml(item.file_name || activeCopy().reportName)} · ${formatTime(item.created_at)}</strong>
         <span>${escapeHtml(item.summary)}</span>
-        <small>${escapeHtml(activeCopy().analysisMode(item.source, item.risk_level))}</small>
+        <small>${escapeHtml(activeCopy().analysisMode(item.source, item.risk_level))} · <a href="/api/checkups/${encodeURIComponent(item.id)}/image" target="_blank" rel="noopener">查看原图</a></small>
       </article>`
     )
     .join("");
@@ -3771,14 +3893,247 @@ function showToast(message, type = "info", duration = 4000) {
   }, duration);
 }
 
+// ===== 第二阶段新增：健康急救卡 / 未活跃告警 / 家庭自助注册 / 长辈免密登录 / 新增照护长辈 =====
+function renderElderProfile(profile) {
+  const p = profile || {};
+  const setVal = (id, value) => {
+    const el = document.querySelector(id);
+    if (el) el.value = value || "";
+  };
+  setVal("#profileBloodType", p.bloodType);
+  setVal("#profileHospital", p.emergencyHospital);
+  setVal("#profileDoctorName", p.doctorName);
+  setVal("#profileDoctorPhone", p.doctorPhone);
+  setVal("#profileAllergies", p.allergies);
+  setVal("#profileChronic", p.chronicConditions);
+  setVal("#profileNotes", p.notes);
+  const enabledEl = document.querySelector("#profileInactivityEnabled");
+  if (enabledEl) enabledEl.checked = Boolean(p.inactivityAlertEnabled);
+  setVal("#profileInactivityDeadline", p.inactivityDeadline || "12:00");
+
+  // 长辈端急救卡渲染
+  const card = document.querySelector("#elderEmergencyCard");
+  const body = document.querySelector("#elderEmergencyCardBody");
+  if (!card || !body) return;
+  const rows = [
+    p.bloodType ? `<div><strong>血型：</strong>${escapeHtml(p.bloodType)}</div>` : "",
+    p.allergies ? `<div><strong>药物过敏史：</strong>${escapeHtml(p.allergies)}</div>` : "",
+    p.chronicConditions ? `<div><strong>慢性病史：</strong>${escapeHtml(p.chronicConditions)}</div>` : "",
+    p.emergencyHospital ? `<div><strong>常用医院：</strong>${escapeHtml(p.emergencyHospital)}</div>` : "",
+    p.doctorName
+      ? `<div><strong>主治医生：</strong>${escapeHtml(p.doctorName)}${
+          p.doctorPhone
+            ? `　<a href="tel:${escapeHtml(p.doctorPhone.replace(/[^\d+]/g, ""))}">${escapeHtml(p.doctorPhone)}</a>`
+            : ""
+        }</div>`
+      : "",
+    p.notes ? `<div><strong>照护备注：</strong>${escapeHtml(p.notes)}</div>` : "",
+  ].filter(Boolean);
+  if (!rows.length) {
+    card.classList.add("is-hidden");
+    body.innerHTML = "";
+    return;
+  }
+  body.innerHTML = rows.join("");
+  card.classList.remove("is-hidden");
+}
+
+document.querySelector("#saveElderProfile")?.addEventListener("click", async () => {
+  const statusEl = document.querySelector("#elderProfileStatus");
+  try {
+    await api("/api/elder-profile", {
+      method: "POST",
+      body: {
+        bloodType: document.querySelector("#profileBloodType")?.value || "",
+        emergencyHospital: document.querySelector("#profileHospital")?.value || "",
+        doctorName: document.querySelector("#profileDoctorName")?.value || "",
+        doctorPhone: document.querySelector("#profileDoctorPhone")?.value || "",
+        allergies: document.querySelector("#profileAllergies")?.value || "",
+        chronicConditions: document.querySelector("#profileChronic")?.value || "",
+        notes: document.querySelector("#profileNotes")?.value || "",
+        inactivityAlertEnabled: Boolean(document.querySelector("#profileInactivityEnabled")?.checked),
+        inactivityDeadline: document.querySelector("#profileInactivityDeadline")?.value || "12:00",
+      },
+    });
+    if (statusEl) statusEl.textContent = "已保存健康急救卡与未活跃告警设置。";
+    showToast("健康急救卡与未活跃告警已保存", "safe");
+    await loadDashboard();
+  } catch (error) {
+    if (statusEl) statusEl.textContent = error.message || "保存失败";
+    showToast(error.message || "保存失败", "warning");
+  }
+});
+
+// 家庭自助注册切换与提交
+document.querySelector("#showRegisterPanel")?.addEventListener("click", () => {
+  document.querySelector("#loginPanel")?.classList.add("is-hidden");
+  document.querySelector("#registerPanel")?.classList.remove("is-hidden");
+});
+
+document.querySelector("#backToLogin")?.addEventListener("click", () => {
+  document.querySelector("#registerPanel")?.classList.add("is-hidden");
+  document.querySelector("#loginPanel")?.classList.remove("is-hidden");
+});
+
+document.querySelector("#registerForm")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const errEl = document.querySelector("#registerError");
+  if (errEl) errEl.textContent = "";
+  try {
+    await api("/api/auth/register", {
+      method: "POST",
+      body: {
+        caregiverDisplayName: document.querySelector("#regCaregiverName")?.value || "",
+        caregiverUsername: document.querySelector("#regCaregiverUsername")?.value || "",
+        caregiverPassword: document.querySelector("#regCaregiverPassword")?.value || "",
+        relation: document.querySelector("#regRelation")?.value || "家属",
+        elderDisplayName: document.querySelector("#regElderName")?.value || "",
+      },
+    });
+    document.querySelector("#registerPanel")?.classList.add("is-hidden");
+    document.querySelector("#loginPanel")?.classList.remove("is-hidden");
+    showToast("家庭创建成功，已自动登录", "safe");
+    await loadDashboard();
+  } catch (error) {
+    if (errEl) errEl.textContent = error.message || "创建失败，请检查填写内容";
+  }
+});
+
+// 家属生成长辈免密登录链接
+document.querySelector("#createElderLoginLink")?.addEventListener("click", async () => {
+  try {
+    const { loginLink } = await api("/api/elder-login-link", { method: "POST" });
+    const box = document.querySelector("#elderLoginLinkResult");
+    const input = document.querySelector("#elderLoginLinkInput");
+    if (input) input.value = loginLink.url;
+    box?.classList.remove("is-hidden");
+    showToast(`已为 ${loginLink.elderName} 生成 24 小时免密登录链接`, "safe");
+  } catch (error) {
+    showToast(error.message || "生成失败", "warning");
+  }
+});
+
+document.querySelector("#copyElderLoginLink")?.addEventListener("click", async () => {
+  const input = document.querySelector("#elderLoginLinkInput");
+  if (!input?.value) return;
+  try {
+    await navigator.clipboard.writeText(input.value);
+    showToast("免密链接已复制，发给长辈点击即可登录", "safe");
+  } catch {
+    input.select();
+    showToast("请手动复制框中的链接", "info");
+  }
+});
+
+// 家属新增照护长辈
+document.querySelector("#createElderBtn")?.addEventListener("click", async () => {
+  const errEl = document.querySelector("#createElderError");
+  if (errEl) errEl.textContent = "";
+  const displayName = document.querySelector("#addElderName")?.value?.trim() || "";
+  const relation = document.querySelector("#addElderRelation")?.value?.trim() || "家属";
+  if (!displayName) {
+    if (errEl) errEl.textContent = "请填写长辈称呼";
+    return;
+  }
+  try {
+    await api("/api/elders", { method: "POST", body: { displayName, relation } });
+    const nameInput = document.querySelector("#addElderName");
+    if (nameInput) nameInput.value = "";
+    showToast(`已添加长辈「${displayName}」并切换过去`, "safe");
+    await loadDashboard();
+  } catch (error) {
+    if (errEl) errEl.textContent = error.message || "添加失败";
+  }
+});
+
+// 多通道群通知配置（企业微信 / 钉钉 / 飞书）
+const channelLabelMap = { wecom: "企业微信", dingtalk: "钉钉", feishu: "飞书" };
+
+async function loadNotificationChannels() {
+  const statusEl = document.querySelector("#channelConfigStatus");
+  if (!statusEl || document.body.dataset.view !== "family") return;
+  try {
+    const { channels } = await api("/api/channels");
+    const active = (channels || []).filter((item) => item.configured);
+    statusEl.textContent = active.length
+      ? `已启用：${active.map((item) => `${channelLabelMap[item.channelType] || item.channelType}（${item.maskedWebhook}）`).join("；")}`
+      : "尚未配置个人群机器人通道。";
+  } catch {
+    statusEl.textContent = "无法加载通知通道状态。";
+  }
+}
+
+document.querySelector("#saveChannelConfig")?.addEventListener("click", async () => {
+  const channelType = document.querySelector("#channelTypeSelect")?.value || "wecom";
+  const webhookInput = document.querySelector("#channelWebhookInput");
+  const statusEl = document.querySelector("#channelConfigStatus");
+  try {
+    await api("/api/channels", {
+      method: "POST",
+      body: { channelType, webhook: webhookInput?.value?.trim() || "" },
+    });
+    if (webhookInput) webhookInput.value = "";
+    showToast(`${channelLabelMap[channelType] || channelType} 通道配置已保存`, "safe");
+    await loadNotificationChannels();
+  } catch (error) {
+    if (statusEl) statusEl.textContent = error.message || "保存通道失败";
+    showToast(error.message || "保存通道失败", "warning");
+  }
+});
+
+document.querySelector("#testChannelConfig")?.addEventListener("click", async () => {
+  const channelType = document.querySelector("#channelTypeSelect")?.value || "wecom";
+  const statusEl = document.querySelector("#channelConfigStatus");
+  try {
+    const { result } = await api("/api/channels/test", { method: "POST", body: { channelType } });
+    const msg = result?.ok ? `${channelLabelMap[channelType] || channelType} 测试消息已发送` : result?.message || "发送失败";
+    if (statusEl) statusEl.textContent = msg;
+    showToast(msg, result?.ok ? "safe" : "warning");
+  } catch (error) {
+    if (statusEl) statusEl.textContent = error.message || "测试发送失败";
+    showToast(error.message || "测试发送失败", "warning");
+  }
+});
+
+// 长辈免密链接入口
+let pendingElderLoginToken = "";
+function openElderLoginLink(token) {
+  pendingElderLoginToken = token;
+  els.loginScreen?.classList.remove("is-hidden");
+  els.appShell?.classList.add("is-hidden");
+  document.querySelector("#loginPanel")?.classList.add("is-hidden");
+  document.querySelector("#registerPanel")?.classList.add("is-hidden");
+  els.invitePanel?.classList.add("is-hidden");
+  document.querySelector("#elderLoginPanel")?.classList.remove("is-hidden");
+}
+
+document.querySelector("#acceptElderLogin")?.addEventListener("click", async () => {
+  const errEl = document.querySelector("#elderLoginError");
+  if (errEl) errEl.textContent = "";
+  try {
+    await api("/api/auth/elder-login", { method: "POST", body: { token: pendingElderLoginToken } });
+    document.querySelector("#elderLoginPanel")?.classList.add("is-hidden");
+    document.querySelector("#loginPanel")?.classList.remove("is-hidden");
+    const cleanUrl = new URL(window.location.href);
+    cleanUrl.searchParams.delete("elder_login");
+    window.history.replaceState({}, "", cleanUrl.pathname + cleanUrl.search);
+    await loadDashboard();
+  } catch (error) {
+    if (errEl) errEl.textContent = error.message || "登录链接无效或已过期";
+  }
+});
+
 setupVoiceInputs();
 setupFontSize();
 applyLanguage();
 els.taskDate.value = todayDate();
-// 带邀请链接打开时直接进「接受邀请」：这条链接就是给还没账号的人用的，
-// 不该先跑一次必然 401 的 dashboard 请求、再让人自己找入口。
-const inviteToken = new URL(window.location.href).searchParams.get("invite");
-if (inviteToken) {
+// 带邀请链接或长辈免密链接打开时直接进对应入口
+const startupParams = new URL(window.location.href).searchParams;
+const inviteToken = startupParams.get("invite");
+const elderLoginToken = startupParams.get("elder_login");
+if (elderLoginToken) {
+  openElderLoginLink(elderLoginToken);
+} else if (inviteToken) {
   openInviteLink(inviteToken);
 } else {
   loadDashboard();

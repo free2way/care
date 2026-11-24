@@ -3322,3 +3322,62 @@ body[data-view="elder"] .invite-list button {
 body[data-view="elder"] .source-note {
   font-size: calc(18px * var(--fs));
 }
+
+/* 第二阶段扩展模块样式：急救卡、用药周几选择、日期区间、家庭子卡片 */
+.emergency-card-box {
+  margin-top: 12px;
+  border: 1px solid rgba(11, 102, 91, 0.25);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.92);
+  padding: 10px 14px;
+}
+
+.emergency-card-box summary {
+  cursor: pointer;
+  font-weight: 700;
+  color: var(--accent-strong);
+}
+
+.emergency-card-body {
+  margin-top: 10px;
+  display: grid;
+  gap: 6px;
+  font-size: 0.95em;
+  line-height: 1.5;
+}
+
+.weekday-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-subtle, #f7faf9);
+}
+
+.weekday-picker label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.inline-date-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.elder-profile-panel,
+.sub-card {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.elder-profile-panel h3,
+.sub-card h3 {
+  margin: 0 0 6px;
+}

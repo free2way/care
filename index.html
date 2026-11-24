@@ -71,6 +71,55 @@
           <span>家属端：caregiver / demo1234</span>
           <span>长辈端：elder / demo1234</span>
         </div>
+        <div class="login-hints">
+          <button class="ghost-button" id="showRegisterPanel" type="button">还没有账号？创建新家庭</button>
+        </div>
+        </div>
+
+        <!-- 自助创建新家庭：直接创建第一位家属和第一位长辈，不再依赖管理员写库 -->
+        <div id="registerPanel" class="is-hidden">
+          <p class="eyebrow">创建新家庭</p>
+          <h2>开启您的家庭照护</h2>
+          <p>填写家属和长辈信息后自动建立绑定，长辈后续可用免密链接直接登录。</p>
+          <form class="login-form" id="registerForm">
+            <label class="field">
+              <span>家属称呼</span>
+              <input id="regCaregiverName" type="text" autocomplete="name" placeholder="例如：小丽" />
+            </label>
+            <label class="field">
+              <span>家属登录名</span>
+              <input id="regCaregiverUsername" type="text" autocomplete="username" placeholder="字母、数字、_ . -" />
+            </label>
+            <label class="field">
+              <span>家属密码</span>
+              <input id="regCaregiverPassword" type="password" autocomplete="new-password" placeholder="至少 8 位" />
+            </label>
+            <label class="field">
+              <span>与长辈的关系</span>
+              <input id="regRelation" type="text" placeholder="例如：女儿" maxlength="16" />
+            </label>
+            <label class="field">
+              <span>长辈称呼</span>
+              <input id="regElderName" type="text" placeholder="例如：张爷爷" maxlength="24" />
+            </label>
+            <button class="primary-button" type="submit">创建家庭并登录</button>
+            <p class="form-error" id="registerError"></p>
+          </form>
+          <div class="login-hints">
+            <button class="ghost-button" id="backToLogin" type="button">已有账号，返回登录</button>
+          </div>
+        </div>
+
+        <!-- 长辈免密绑定链接：家人发到老人手机，点一下直接进入并保持 90 天登录 -->
+        <div id="elderLoginPanel" class="is-hidden">
+          <p class="eyebrow">长辈免密登录</p>
+          <h2>家人已为您准备好入口</h2>
+          <p>不需要记账号密码，点下面大按钮即可直接进入今天的提醒清单。</p>
+          <button class="primary-button" id="acceptElderLogin" type="button">直接进入长辈端</button>
+          <p class="form-error" id="elderLoginError"></p>
+          <div class="login-hints">
+            <span><a href="?">返回账号密码登录</a></span>
+          </div>
         </div>
 
         <!-- 收到邀请链接时显示：让对方自己设置登录名和密码，不需要管理员代建账号 -->
@@ -179,6 +228,10 @@
             </a>
             <button class="safe-button" id="elderCheckIn" type="button">我没事，报个平安</button>
           </div>
+          <details class="emergency-card-box is-hidden" id="elderEmergencyCard">
+            <summary>查看我的健康急救卡（血型 / 过敏史 / 医生电话）</summary>
+            <div class="emergency-card-body" id="elderEmergencyCardBody"></div>
+          </details>
         </section>
 
         <section class="module-grid">
@@ -232,6 +285,12 @@
               </div>
             </label>
 
+            <label class="field">
+              <span>或直接上传可疑截图（微信聊天 / 短信 / 网页）</span>
+              <input id="fraudImageInput" type="file" accept="image/png,image/jpeg,image/webp" />
+              <span class="muted" id="fraudImageName">支持直接截图上传，不用自己打字或复制。</span>
+            </label>
+
             <div class="button-row">
               <button class="primary-button" id="analyzeFraud" type="button">开始检测</button>
               <button class="secondary-button" id="clearFraud" type="button">清空</button>
@@ -249,7 +308,8 @@
 
               <section class="plain-output">
                 <h3>给老人的回复</h3>
-                <p id="elderReply">输入内容后，小护会用老人听得懂的话说明风险。</p>
+                <p id="elderReply">输入内容或上传截图后，小护会用老人听得懂的话说明风险。</p>
+                <p class="source-note is-hidden" id="fraudSourceNote"></p>
               </section>
             </div>
 
@@ -394,6 +454,33 @@
                     <span class="muted">还没有选时间。点上面的常用时间，或在时间框里自己选。</span>
                   </div>
                   <label class="field">
+                    <span>服用频率</span>
+                    <select id="medicineRepeatRule">
+                      <option value="daily" selected>每天</option>
+                      <option value="alternate">隔日一次</option>
+                      <option value="weekly">每周固定日</option>
+                    </select>
+                  </label>
+                  <div class="weekday-picker is-hidden" id="medicineRepeatDays" role="group" aria-label="每周用药日">
+                    <label><input type="checkbox" value="1" /> 周一</label>
+                    <label><input type="checkbox" value="2" /> 周二</label>
+                    <label><input type="checkbox" value="3" /> 周三</label>
+                    <label><input type="checkbox" value="4" /> 周四</label>
+                    <label><input type="checkbox" value="5" /> 周五</label>
+                    <label><input type="checkbox" value="6" /> 周六</label>
+                    <label><input type="checkbox" value="7" /> 周日</label>
+                  </div>
+                  <div class="inline-date-row">
+                    <label class="field">
+                      <span>开始日期（可选）</span>
+                      <input id="medicineStartDate" type="date" />
+                    </label>
+                    <label class="field">
+                      <span>停药日期（可选）</span>
+                      <input id="medicineEndDate" type="date" />
+                    </label>
+                  </div>
+                  <label class="field">
                     <span>说明</span>
                     <input id="medicineDose" type="text" placeholder="例如：饭后，一片" />
                   </label>
@@ -505,6 +592,14 @@
                 <span>时间</span>
                 <input id="taskTime" type="time" />
               </label>
+              <label class="field">
+                <span>重复频率</span>
+                <select id="taskRepeatRule">
+                  <option value="none" selected>单次任务</option>
+                  <option value="daily">每天重复</option>
+                  <option value="weekly">每周重复</option>
+                </select>
+              </label>
               <label class="field form-wide">
                 <span>说明</span>
                 <input id="taskDescription" type="text" placeholder="例如：量完告诉我结果" />
@@ -605,6 +700,51 @@
               <div class="indicator-list" id="indicatorList">
                 <p class="muted">正在加载…</p>
               </div>
+            </section>
+
+            <section class="elder-profile-panel" id="elderProfilePanel">
+              <h3>健康急救卡与未活跃告警</h3>
+              <p class="muted">填写过敏史、慢病与医生电话后会同步到长辈端急救卡与复诊摘要；开启未活跃告警后，若长辈当天超过截止时间仍无任何动静，会自动提醒家人。</p>
+              <div class="compact-form">
+                <label class="field">
+                  <span>血型</span>
+                  <input id="profileBloodType" type="text" placeholder="例如：A 型" maxlength="16" />
+                </label>
+                <label class="field">
+                  <span>常用医院</span>
+                  <input id="profileHospital" type="text" placeholder="例如：协和医院" maxlength="100" />
+                </label>
+                <label class="field">
+                  <span>主治医生</span>
+                  <input id="profileDoctorName" type="text" placeholder="例如：王主任" maxlength="40" />
+                </label>
+                <label class="field">
+                  <span>医生电话</span>
+                  <input id="profileDoctorPhone" type="tel" placeholder="例如：010-69156114" maxlength="20" />
+                </label>
+                <label class="field form-wide">
+                  <span>药物过敏史</span>
+                  <input id="profileAllergies" type="text" placeholder="例如：青霉素过敏（无则填无）" maxlength="200" />
+                </label>
+                <label class="field form-wide">
+                  <span>慢性病史</span>
+                  <input id="profileChronic" type="text" placeholder="例如：高血压 2 级、2 型糖尿病" maxlength="200" />
+                </label>
+                <label class="field form-wide">
+                  <span>照护备注</span>
+                  <input id="profileNotes" type="text" placeholder="例如：右耳听力较弱，沟通请放慢语速" maxlength="300" />
+                </label>
+                <label class="pref-item form-wide">
+                  <input id="profileInactivityEnabled" type="checkbox" />
+                  <span>开启「静默未活跃」主动告警</span>
+                </label>
+                <label class="field">
+                  <span>每日未活跃检查截止时间</span>
+                  <input id="profileInactivityDeadline" type="time" value="12:00" />
+                </label>
+                <button class="primary-button" id="saveElderProfile" type="button">保存健康卡与告警设置</button>
+              </div>
+              <p class="send-status" id="elderProfileStatus"></p>
             </section>
           </article>
 
@@ -783,6 +923,34 @@
 
             <div class="invite-pending" id="invitePending"></div>
 
+            <section class="sub-card">
+              <h3>长辈免密登录链接</h3>
+              <p class="muted">老人不用记账号密码：生成一个 24 小时有效的免密链接发到老人手机，点开即进入并保持 90 天登录。</p>
+              <button class="secondary-button" id="createElderLoginLink" type="button">生成当前长辈的免密链接</button>
+              <div class="invite-result is-hidden" id="elderLoginLinkResult">
+                <div class="invite-link-row">
+                  <input id="elderLoginLinkInput" type="text" readonly />
+                  <button class="secondary-button" id="copyElderLoginLink" type="button">复制</button>
+                </div>
+              </div>
+            </section>
+
+            <section class="sub-card">
+              <h3>新增照护长辈</h3>
+              <div class="invite-create">
+                <label class="field">
+                  <span>长辈称呼</span>
+                  <input id="addElderName" type="text" placeholder="例如：李奶奶" maxlength="24" />
+                </label>
+                <label class="field">
+                  <span>您的关系</span>
+                  <input id="addElderRelation" type="text" placeholder="例如：儿子" maxlength="16" />
+                </label>
+                <button class="secondary-button" id="createElderBtn" type="button">添加长辈</button>
+              </div>
+              <p class="form-error" id="createElderError"></p>
+            </section>
+
             <div class="table-wrap">
               <table>
                 <thead>
@@ -870,11 +1038,39 @@
                 <span>长辈报平安</span>
               </label>
               <label class="pref-item">
+                <input type="checkbox" data-pref="inactivity_alert" checked />
+                <span>长辈未活跃提醒</span>
+              </label>
+              <label class="pref-item">
                 <input type="checkbox" data-pref="feishu_enabled" checked />
                 <span>飞书推送</span>
               </label>
             </div>
             <button class="primary-button" id="savePrefs" type="button">保存偏好</button>
+
+            <section class="sub-card" id="channelConfigPanel">
+              <h3>多通道群通知配置（企业微信 / 钉钉 / 飞书）</h3>
+              <p class="muted">不用飞书的家庭可配置企业微信群机器人（微信内可直接收消息）或钉钉群机器人，告警会同步推送到已启用的通道。留空保存可清除配置。</p>
+              <div class="compact-form">
+                <label class="field">
+                  <span>通知通道</span>
+                  <select id="channelTypeSelect">
+                    <option value="wecom">企业微信群机器人（微信可用）</option>
+                    <option value="dingtalk">钉钉群机器人</option>
+                    <option value="feishu">飞书群机器人</option>
+                  </select>
+                </label>
+                <label class="field form-wide">
+                  <span>机器人 Webhook 地址</span>
+                  <input id="channelWebhookInput" type="url" placeholder="粘贴对应平台的 HTTPS 群机器人 Webhook" />
+                </label>
+                <div class="button-row">
+                  <button class="primary-button" id="saveChannelConfig" type="button">保存通道</button>
+                  <button class="secondary-button" id="testChannelConfig" type="button">测试发送</button>
+                </div>
+              </div>
+              <p class="send-status" id="channelConfigStatus">正在加载已配置通道…</p>
+            </section>
           </article>
         </section>
 

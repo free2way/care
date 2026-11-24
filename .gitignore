@@ -3,6 +3,8 @@ data/*.db-shm
 data/*.db-wal
 # seed 脚本每次运行都会自动备份原库，别让它出现在 git status 里
 data/*.bak-*
+# 体检报告上传原图（本地存储模式）属于敏感健康数据，绝不入库到 Git
+data/uploads/
 node_modules/
 .env
 .env.*
