@@ -286,6 +286,15 @@ button {
   padding: 22px;
 }
 
+/* min-width:0 防止内部表格/画布的 min-content 把栅格撑爆（手机端横向溢出的根因之一）。 */
+.workspace,
+.module-grid,
+.module,
+.hero-panel,
+.logs {
+  min-width: 0;
+}
+
 .rail {
   position: sticky;
   top: 94px;
@@ -1282,6 +1291,12 @@ tbody tr:last-child td {
   background: var(--accent-strong);
 }
 
+/* 全站 13+ 处成功提示用的是 "safe"，但之前只定义了 success —— 那些提示会落到深灰底，
+   和失败提示几乎看不出区别。补上映射，让「已保存」一眼能认出是成功。 */
+.toast.toast-safe {
+  background: var(--safe);
+}
+
 @keyframes toastIn {
   from {
     opacity: 0;
@@ -1369,7 +1384,7 @@ tbody tr:last-child td {
 
 @media (max-width: 1080px) {
   .app-shell {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .rail {
@@ -1381,9 +1396,11 @@ tbody tr:last-child td {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
+  /* 这里原本是 1fr，等于 minmax(auto, 1fr)，会把表格的 min-content 宽度
+     顶到整个栅格上，导致手机上整页横向溢出、卡片右侧被切掉。 */
   .hero-panel,
   .module-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .metric-row {
@@ -1391,37 +1408,58 @@ tbody tr:last-child td {
   }
 
   .hero-panel {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     align-items: start;
   }
 
   .care-config {
     grid-column: auto;
   }
+
+  /* 单列时侧栏不能再排在最前面：手机上长辈要先滚过档案卡和清单卡
+     才看得到「今天要做的事」。把主工作区提前，侧栏退到后面。 */
+  .app-shell > .workspace {
+    order: 1;
+  }
+
+  .app-shell > .rail {
+    order: 2;
+  }
+
+  /* 「今天要注意」是静态装饰清单，和今日待办重复，小屏直接省掉。 */
+  .acceptance {
+    display: none;
+  }
 }
 
 @media (max-width: 700px) {
   body {
-    padding-bottom: 88px;
+    padding-bottom: 132px;
   }
 
+  /* 手机上标题栏挤成一行会把应用名截断，改成上下两行。 */
   .topbar {
     position: sticky;
-    flex-direction: row;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 12px;
-    padding: 12px 16px;
+    gap: 8px 12px;
+    padding: 10px 16px;
   }
 
   .topbar-actions {
-    flex: 0 0 auto;
-    justify-content: flex-end;
-    width: auto;
+    flex: 1 1 100%;
+    justify-content: flex-start;
+    width: 100%;
     gap: 8px;
   }
 
+  .topbar h1 {
+    font-size: 20px;
+    max-width: none;
+  }
+
   .role-chip {
-    max-width: 40vw;
+    max-width: none;
     padding-left: 10px;
   }
 
@@ -1492,34 +1530,33 @@ tbody tr:last-child td {
     gap: 14px;
   }
 
+  /* 老人不会左右滑动去找菜单，改成 4 列网格一次显示完整，去掉横向滚动。 */
   .nav-list {
     position: fixed;
     right: 12px;
     bottom: 12px;
     left: 12px;
     z-index: 20;
-    display: flex;
-    overflow-x: auto;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    overflow: visible;
     gap: 6px;
     border: 1px solid rgba(216, 225, 221, 0.92);
     border-radius: var(--radius);
     padding: 8px;
-    background: rgba(255, 255, 255, 0.94);
+    background: rgba(255, 255, 255, 0.96);
     backdrop-filter: blur(12px);
     box-shadow: 0 16px 38px rgba(32, 50, 43, 0.18);
-    scrollbar-width: none;
-  }
-
-  .nav-list::-webkit-scrollbar {
-    display: none;
   }
 
   .nav-list a {
-    flex: 0 0 auto;
-    min-width: 86px;
-    padding: 10px 12px;
+    min-width: 0;
+    padding: 10px 6px;
     background: var(--surface-strong);
     text-align: center;
+    text-overflow: ellipsis;
+    overflow: hidden;
+    white-space: nowrap;
   }
 
   .hero-panel {
@@ -1611,4 +1648,1677 @@ tbody tr:last-child td {
   td {
     white-space: nowrap;
   }
+}
+
+/* ==========================================================================
+   长辈端：今天的待办 + 适老可读性
+   body[data-view="elder"] 由 src/app.js 在渲染时写入，用来把长辈端和
+   家属端彻底分开调样式：长辈端字号更大、点击区更大、信息更少。
+   ========================================================================== */
+
+[hidden] {
+  display: none !important;
+}
+
+/* --- 紧急求助条 --- */
+
+.emergency-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  border: 1px solid rgba(161, 30, 21, 0.3);
+  border-left: 6px solid var(--danger);
+  border-radius: var(--radius);
+  background: #fff6f5;
+  padding: 18px 22px;
+}
+
+.emergency-text {
+  min-width: 0;
+}
+
+.emergency-text strong {
+  display: block;
+  color: var(--danger);
+  font-size: 20px;
+  line-height: 1.3;
+}
+
+.emergency-text span {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted-strong);
+  line-height: 1.6;
+}
+
+.danger-button {
+  flex: 0 0 auto;
+  min-height: 64px;
+  min-width: 208px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  padding: 0 26px;
+  background: var(--danger);
+  color: #ffffff;
+  font-size: 20px;
+  font-weight: 850;
+  white-space: nowrap;
+  box-shadow: 0 12px 24px rgba(161, 30, 21, 0.22);
+}
+
+.danger-button:hover {
+  background: #8a1a12;
+}
+
+.danger-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 4px rgba(161, 30, 21, 0.24);
+}
+
+/* --- 今天的待办 --- */
+
+.today-board {
+  grid-column: 1 / -1;
+}
+
+.today-clock {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 17px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.today-list {
+  display: grid;
+  gap: 10px;
+}
+
+.todo-item {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  border: 1px solid rgba(11, 102, 91, 0.16);
+  border-left: 6px solid rgba(11, 102, 91, 0.2);
+  border-radius: var(--radius);
+  background: #ffffff;
+  padding: 14px 16px;
+}
+
+.todo-time {
+  color: var(--muted-strong);
+  font-size: 21px;
+  font-weight: 850;
+  font-variant-numeric: tabular-nums;
+}
+
+.todo-body {
+  min-width: 0;
+}
+
+.todo-body strong {
+  display: block;
+  font-size: 20px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.todo-body span {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 17px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.todo-state {
+  display: inline-block;
+  margin-top: 8px;
+  border-radius: 999px;
+  padding: 4px 12px;
+  background: rgba(25, 32, 29, 0.07);
+  color: var(--muted-strong);
+  font-size: 15px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.todo-action {
+  justify-self: end;
+}
+
+.todo-button {
+  min-height: 56px;
+  min-width: 128px;
+  font-size: 18px;
+}
+
+.todo-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: rgba(26, 110, 68, 0.12);
+  color: var(--safe);
+  font-size: 22px;
+  font-weight: 900;
+}
+
+/* 已完成：整条压暗，让还没做的更显眼 */
+.todo-item[data-state="done"] {
+  border-left-color: rgba(26, 110, 68, 0.35);
+  background: var(--surface-strong);
+}
+
+.todo-item[data-state="done"] .todo-body strong,
+.todo-item[data-state="done"] .todo-time {
+  color: var(--muted);
+}
+
+/* 现在该做：绿色描边提示 */
+.todo-item[data-state="due"] {
+  border-color: rgba(11, 102, 91, 0.45);
+  border-left-color: var(--accent);
+  background: #f2fbf8;
+}
+
+.todo-item[data-state="due"] .todo-state {
+  background: rgba(11, 102, 91, 0.14);
+  color: var(--accent-strong);
+}
+
+/* 超时未确认：醒目红色，这是最需要老人注意的状态 */
+.todo-item[data-state="overdue"] {
+  border-color: rgba(161, 30, 21, 0.4);
+  border-left-color: var(--danger);
+  background: #fff6f5;
+}
+
+.todo-item[data-state="overdue"] .todo-state {
+  background: rgba(161, 30, 21, 0.13);
+  color: var(--danger);
+}
+
+.todo-item[data-state="overdue"] .todo-time {
+  color: var(--danger);
+}
+
+.today-weather {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  margin-top: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-strong);
+  padding: 16px 18px;
+}
+
+.today-weather-label {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  padding: 5px 12px;
+  color: var(--accent-strong);
+  font-size: 15px;
+  font-weight: 850;
+}
+
+.today-weather p {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.7;
+}
+
+.today-weather[hidden] {
+  display: none;
+}
+
+.today-board .push-row {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.today-board .push-row .send-status {
+  width: 100%;
+}
+
+/* --- 长辈端整体放大 ---
+   --fs 是长辈端的字号倍率，由「字号」开关写进 body[data-font]。
+   这里的尺寸都用 calc(px * var(--fs))，一次调节整页有效。 */
+
+body[data-view="elder"] {
+  --fs: 1;
+}
+
+body[data-view="elder"][data-font="large"] {
+  --fs: 1.12;
+}
+
+body[data-view="elder"][data-font="xlarge"] {
+  --fs: 1.26;
+}
+
+body[data-view="elder"] {
+  font-size: calc(18px * var(--fs));
+}
+
+body[data-view="elder"] .hero-panel {
+  min-height: 0;
+  padding: calc(24px * var(--fs)) calc(22px * var(--fs));
+}
+
+body[data-view="elder"] .hero-panel h2 {
+  font-size: calc(30px * var(--fs));
+}
+
+body[data-view="elder"] .hero-panel p:not(.eyebrow) {
+  font-size: calc(18px * var(--fs));
+}
+
+body[data-view="elder"] .module,
+body[data-view="elder"] .logs {
+  padding: calc(22px * var(--fs));
+}
+
+body[data-view="elder"] .module h2,
+body[data-view="elder"] .logs h2 {
+  font-size: calc(25px * var(--fs));
+}
+
+body[data-view="elder"] .eyebrow {
+  font-size: calc(15px * var(--fs));
+}
+
+body[data-view="elder"] .primary-button,
+body[data-view="elder"] .secondary-button,
+body[data-view="elder"] .ghost-button {
+  min-height: calc(56px * var(--fs));
+  font-size: calc(18px * var(--fs));
+  padding: 0 calc(22px * var(--fs));
+}
+
+body[data-view="elder"] .ghost-button {
+  min-height: calc(48px * var(--fs));
+  font-size: calc(16px * var(--fs));
+}
+
+body[data-view="elder"] input,
+body[data-view="elder"] select,
+body[data-view="elder"] textarea {
+  font-size: calc(18px * var(--fs));
+}
+
+body[data-view="elder"] input,
+body[data-view="elder"] select {
+  min-height: calc(56px * var(--fs));
+}
+
+body[data-view="elder"] .field {
+  font-size: calc(17px * var(--fs));
+}
+
+body[data-view="elder"] .muted,
+body[data-view="elder"] .plain-output p,
+body[data-view="elder"] .health-summary {
+  font-size: calc(17px * var(--fs));
+  line-height: 1.8;
+}
+
+body[data-view="elder"] .plain-output h3 {
+  font-size: calc(18px * var(--fs));
+}
+
+body[data-view="elder"] .reminder-item strong {
+  font-size: calc(19px * var(--fs));
+}
+
+body[data-view="elder"] .reminder-item span {
+  font-size: calc(17px * var(--fs));
+}
+
+body[data-view="elder"] table {
+  font-size: calc(17px * var(--fs));
+}
+
+body[data-view="elder"] .small-badge {
+  font-size: calc(15px * var(--fs));
+  padding: calc(6px * var(--fs)) calc(12px * var(--fs));
+}
+
+body[data-view="elder"] .nav-list a {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: calc(54px * var(--fs));
+  font-size: calc(17px * var(--fs));
+}
+
+body[data-view="elder"] .topbar .eyebrow {
+  font-size: calc(13px * var(--fs));
+}
+
+body[data-view="elder"] .login-panel h2 {
+  font-size: calc(30px * var(--fs));
+}
+
+@media (max-width: 700px) {
+  .emergency-strip {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 14px;
+    padding: 16px;
+  }
+
+  .danger-button {
+    min-width: 0;
+    width: 100%;
+    min-height: 68px;
+  }
+
+  .todo-item {
+    grid-template-columns: 68px minmax(0, 1fr);
+    align-items: start;
+    gap: 12px;
+    padding: 14px;
+  }
+
+  /* 时间对齐到标题那一行，扫视时更容易一一对应。 */
+  .todo-time {
+    padding-top: 3px;
+  }
+
+  .todo-action {
+    grid-column: 1 / -1;
+    justify-self: stretch;
+  }
+
+  .todo-button {
+    width: 100%;
+    min-height: 58px;
+  }
+
+  .todo-check {
+    grid-column: 1 / -1;
+    justify-self: end;
+  }
+
+  .today-weather {
+    flex-direction: column;
+    gap: 10px;
+  }
+}
+
+/* 长辈端按「今天要做的事 → 健康 → 出门 → 其余」重排，用 order 而不是挪 HTML，
+   避免和家属端的模块顺序互相牵制。 */
+body[data-view="elder"] .module-grid > * {
+  order: 50;
+}
+
+body[data-view="elder"] #todayBoard {
+  order: 1;
+}
+
+body[data-view="elder"] #bloodPressure {
+  order: 2;
+}
+
+body[data-view="elder"] #travel {
+  order: 3;
+}
+
+body[data-view="elder"] #memory {
+  order: 4;
+}
+
+body[data-view="elder"] #fraud {
+  order: 5;
+}
+
+body[data-view="elder"] #checkupUpload {
+  order: 6;
+}
+
+.todo-carried {
+  margin-top: 14px;
+}
+
+.todo-carried > summary {
+  cursor: pointer;
+  border: 1px dashed rgba(161, 30, 21, 0.45);
+  border-radius: var(--radius);
+  background: #fff6f5;
+  padding: 14px 16px;
+  color: var(--danger);
+  font-size: 17px;
+  font-weight: 850;
+  list-style-position: inside;
+}
+
+.todo-carried[open] > summary {
+  margin-bottom: 10px;
+}
+
+.todo-carried > .todo-item {
+  margin-bottom: 10px;
+}
+
+/* 长辈端看防骗结果时，先给一句听得懂的结论，评分数字退到后面。 */
+body[data-view="elder"] .result-split {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+body[data-view="elder"] .result-split > .plain-output {
+  order: -1;
+  border-color: rgba(11, 102, 91, 0.3);
+  background: #f2fbf8;
+}
+
+body[data-view="elder"] #elderReply {
+  font-size: 21px;
+  font-weight: 750;
+  line-height: 1.8;
+}
+
+body[data-view="elder"] .risk-meter {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px 16px;
+}
+
+body[data-view="elder"] .risk-meter > span {
+  grid-column: 1 / -1;
+}
+
+body[data-view="elder"] .risk-meter > strong {
+  margin: 0;
+  font-size: 34px;
+}
+
+body[data-view="elder"] .risk-meter > p {
+  margin: 0;
+}
+
+body[data-view="elder"] .meter-track {
+  grid-column: 1 / -1;
+}
+
+/* 家属端：已选用药时间的小标签 */
+.time-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 4px;
+}
+
+.time-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  border: 1px solid rgba(11, 102, 91, 0.35);
+  border-radius: 999px;
+  padding: 0 14px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 15px;
+  font-weight: 850;
+  font-variant-numeric: tabular-nums;
+}
+
+.time-chip span {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.time-chip:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+/* 家属端：漏服面板 —— 长辈不会主动说漏吃药，这块要让家属一眼看到。 */
+.missed-panel {
+  margin-top: 18px;
+}
+
+.missed-panel h3 {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+
+.missed-list {
+  display: grid;
+  gap: 10px;
+}
+
+.missed-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid rgba(161, 30, 21, 0.32);
+  border-left: 5px solid var(--danger);
+  border-radius: var(--radius);
+  background: #fff6f5;
+  padding: 12px 14px;
+}
+
+.missed-item strong {
+  font-size: 15px;
+  white-space: nowrap;
+}
+
+.missed-item span {
+  color: var(--muted-strong);
+  overflow-wrap: anywhere;
+}
+
+.missed-item em {
+  border-radius: 999px;
+  background: rgba(161, 30, 21, 0.13);
+  padding: 4px 10px;
+  color: var(--danger);
+  font-size: 13px;
+  font-style: normal;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+@media (max-width: 700px) {
+  .missed-item {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .missed-item span {
+    grid-column: 1 / -1;
+  }
+
+  .missed-item em {
+    justify-self: start;
+  }
+}
+
+/* 语音输入是长辈端最重要的无障碍入口，顶部小控件也一样要够大够好点。 */
+body[data-view="elder"] .voice-button {
+  min-height: 56px;
+  padding: 0 22px;
+  font-size: 17px;
+}
+
+body[data-view="elder"] .voice-actions {
+  align-items: center;
+  gap: 12px;
+}
+
+body[data-view="elder"] .topbar .language-toggle {
+  min-height: 56px;
+  padding: 0 18px;
+  font-size: 16px;
+}
+
+body[data-view="elder"] .notif-bell {
+  width: 48px;
+  height: 48px;
+}
+
+body[data-view="elder"] .role-chip button {
+  min-height: 44px;
+  padding: 0 16px;
+  font-size: 16px;
+}
+
+/* 窄屏下让「XX已登录」缩短，避免标题栏被挤成三行。 */
+@media (max-width: 700px) {
+  .topbar-actions {
+    flex-wrap: nowrap;
+  }
+
+  .role-chip {
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  #currentRoleName {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.role-chip button {
+  white-space: nowrap;
+}
+
+/* 求助条：主按钮是「联系家人」，次按钮是「报平安」——两个动作都在，不能只给危险选项。 */
+.emergency-actions {
+  display: grid;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.safe-button {
+  min-height: 52px;
+  border: 1px solid rgba(11, 102, 91, 0.4);
+  border-radius: var(--radius);
+  padding: 0 24px;
+  background: #ffffff;
+  color: var(--accent-strong);
+  font-size: 18px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.safe-button:hover {
+  border-color: var(--accent);
+  background: #f2fbf8;
+}
+
+.safe-button:disabled,
+.danger-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+@media (max-width: 700px) {
+  .emergency-actions {
+    width: 100%;
+  }
+
+  .safe-button {
+    min-height: 58px;
+  }
+}
+
+/* 未开启到点提醒时的提示条：这是决定「手机到点会不会响」的开关，
+   放在今天待办的最上面，比藏在底部的小按钮更容易被看到。 */
+.push-nudge {
+  display: block;
+  width: 100%;
+  margin: 0 0 16px;
+  border: 1px solid rgba(158, 79, 0, 0.42);
+  border-left: 6px solid var(--warn);
+  border-radius: var(--radius);
+  background: #fff8ef;
+  padding: 14px 16px;
+  color: var(--warn);
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 1.6;
+  text-align: left;
+}
+
+.push-nudge:hover {
+  background: #fff1e0;
+}
+
+.push-nudge.is-hidden {
+  display: none;
+}
+
+body[data-view="elder"] .push-nudge {
+  font-size: 17px;
+  padding: 16px 18px;
+}
+
+/* 语音朗读按钮：视力不好的长辈靠它把内容听明白，所以做到和主操作按钮一样大。 */
+.speak-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 56px;
+  min-width: 160px;
+  margin: 0 0 16px;
+  border: 1px solid rgba(11, 102, 91, 0.4);
+  border-radius: var(--radius);
+  background: #eef7f4;
+  padding: 0 22px;
+  color: var(--accent-strong);
+  font-size: 18px;
+  font-weight: 850;
+}
+
+.speak-button::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-top: 9px solid transparent;
+  border-bottom: 9px solid transparent;
+  border-left: 14px solid currentColor;
+}
+
+.speak-button:hover {
+  border-color: var(--accent);
+  background: #e2f2ed;
+}
+
+.speak-button.is-speaking {
+  border-color: var(--warn);
+  background: #fff8ef;
+  color: var(--warn);
+}
+
+/* 朗读中把三角换成方块，表示「再点一下会停」。 */
+.speak-button.is-speaking::before {
+  width: 14px;
+  height: 14px;
+  border: 0;
+  background: currentColor;
+  border-radius: 2px;
+}
+
+body[data-view="elder"] .speak-button {
+  width: 100%;
+  min-height: 60px;
+}
+
+/* 家属端：提醒的编辑 / 停用 / 删除 */
+.schedule-item {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.schedule-item.is-disabled {
+  border-color: var(--line);
+  background: var(--surface-strong);
+}
+
+.schedule-item.is-disabled strong,
+.schedule-item.is-disabled span {
+  color: var(--muted);
+}
+
+.schedule-item.is-editing {
+  border-color: var(--accent);
+  background: #f2fbf8;
+}
+
+.schedule-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+}
+
+.schedule-edit {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+}
+
+.schedule-edit .field {
+  margin: 6px 0;
+}
+
+.ghost-button.is-danger {
+  border-color: rgba(161, 30, 21, 0.4);
+  color: var(--danger);
+}
+
+.ghost-button.is-danger:hover {
+  border-color: var(--danger);
+  background: #fff6f5;
+  color: var(--danger);
+}
+
+@media (max-width: 700px) {
+  /* 三个操作并排：竖着堆的话一条提醒要占 260px，列表会长得没法用。 */
+  .schedule-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .schedule-actions > button {
+    width: 100%;
+    min-height: 44px;
+    padding: 0 8px;
+  }
+
+  .schedule-item {
+    gap: 10px;
+    padding: 12px;
+  }
+}
+
+/* ============ 字号三档 & 新增控件 ============ */
+
+/* 只在长辈端出现的组件也要跟着 --fs 缩放（基础规则写在通用区，这里按长辈端覆盖）。 */
+body[data-view="elder"] .today-clock { font-size: calc(17px * var(--fs)); }
+body[data-view="elder"] .todo-time { font-size: calc(21px * var(--fs)); }
+body[data-view="elder"] .todo-body strong { font-size: calc(20px * var(--fs)); }
+body[data-view="elder"] .todo-body span { font-size: calc(18px * var(--fs)); }
+body[data-view="elder"] .todo-state { font-size: calc(18px * var(--fs)); }
+body[data-view="elder"] .todo-button { min-height: calc(56px * var(--fs)); font-size: calc(18px * var(--fs)); }
+body[data-view="elder"] .emergency-text strong { font-size: calc(20px * var(--fs)); }
+body[data-view="elder"] .emergency-text span { font-size: calc(18px * var(--fs)); }
+body[data-view="elder"] .danger-button { min-height: calc(64px * var(--fs)); font-size: calc(20px * var(--fs)); }
+body[data-view="elder"] .safe-button { min-height: calc(56px * var(--fs)); font-size: calc(18px * var(--fs)); }
+body[data-view="elder"] .today-weather-label { font-size: calc(18px * var(--fs)); }
+body[data-view="elder"] .today-weather p { font-size: calc(18px * var(--fs)); }
+body[data-view="elder"] .push-nudge { font-size: calc(17px * var(--fs)); }
+body[data-view="elder"] .speak-button { min-height: calc(60px * var(--fs)); font-size: calc(18px * var(--fs)); }
+body[data-view="elder"] .todo-item {
+  grid-template-columns: calc(84px * var(--fs)) minmax(0, 1fr) auto;
+  padding: calc(14px * var(--fs)) calc(16px * var(--fs));
+}
+
+/* 字号选择器 */
+.font-size-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 16px;
+}
+
+.font-size-label {
+  color: var(--muted-strong);
+  font-weight: 800;
+}
+
+.font-size-option {
+  min-height: 48px;
+  min-width: 64px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: #ffffff;
+  padding: 0 16px;
+  color: var(--ink);
+  font-size: 17px;
+  font-weight: 850;
+}
+
+.font-size-option.is-active {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #ffffff;
+}
+
+body[data-view="elder"] .font-size-label { font-size: calc(17px * var(--fs)); }
+body[data-view="elder"] .font-size-option {
+  min-height: calc(56px * var(--fs));
+  font-size: calc(18px * var(--fs));
+}
+
+/* 直接拨号：飞书没配好时这是最可靠的求助方式 */
+.call-button {
+  display: grid;
+  gap: 2px;
+  min-height: 64px;
+  border: 2px solid var(--accent);
+  border-radius: var(--radius);
+  background: #ffffff;
+  padding: 8px 22px;
+  color: var(--accent-strong);
+  text-align: center;
+  text-decoration: none;
+}
+
+.call-button-label {
+  font-size: 20px;
+  font-weight: 850;
+}
+
+.call-button-number {
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+}
+
+body[data-view="elder"] .call-button { min-height: calc(64px * var(--fs)); }
+body[data-view="elder"] .call-button-label { font-size: calc(20px * var(--fs)); }
+body[data-view="elder"] .call-button-number { font-size: calc(16px * var(--fs)); }
+
+/* 家属端：切换正在照护的长辈 */
+.elder-switcher {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+  color: var(--muted-strong);
+  font-weight: 800;
+}
+
+.elder-switcher select {
+  min-height: 48px;
+  min-width: 180px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: #ffffff;
+  padding: 0 12px;
+  color: var(--ink);
+  font-size: 17px;
+  font-weight: 800;
+}
+
+@media (max-width: 700px) {
+  /* 手机上标签单独一行、三个档位等宽一行，避免「特大」被挤到第三行。 */
+  .font-size-row {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .font-size-label {
+    grid-column: 1 / -1;
+  }
+
+  .font-size-option {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .elder-switcher {
+    width: 100%;
+  }
+
+  .elder-switcher select {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  /* 特大字号下 4 列会挤，换成 3 列 2 行。 */
+  body[data-view="elder"][data-font="xlarge"] .nav-list {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  body[data-view="elder"] .nav-list a {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    line-height: 1.25;
+  }
+
+  body[data-view="elder"] .todo-item {
+    grid-template-columns: calc(68px * var(--fs)) minmax(0, 1fr);
+  }
+}
+
+/* 家属端：紧急联系电话面板 */
+.contact-panel {
+  margin-top: 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-strong);
+  padding: 16px;
+}
+
+.contact-panel h3 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.contact-panel .field {
+  margin: 12px 0;
+}
+
+.contact-panel .field input {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+/* 生活记录表格 */
+.life-kind {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 3px 10px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 13px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+/* 身体不适是唯一需要家属立刻注意的类型，单独用醒目色。 */
+.life-kind-unwell {
+  background: rgba(161, 30, 21, 0.13);
+  color: var(--danger);
+}
+
+.life-source {
+  white-space: nowrap;
+}
+
+.life-delete {
+  margin-left: 10px;
+}
+
+.memory-hint {
+  margin: 12px 0 0;
+  border-left: 4px solid rgba(158, 79, 0, 0.5);
+  border-radius: var(--radius);
+  background: #fff8ef;
+  padding: 10px 14px;
+  color: var(--warn);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.6;
+}
+
+/* 「我有点不舒服」是负向操作，和三个正向快捷按钮区分开 */
+.danger-quick {
+  border-color: rgba(158, 79, 0, 0.5);
+  color: var(--warn);
+}
+
+.daily-summary {
+  margin-top: 22px;
+}
+
+.daily-summary h3 {
+  margin: 0 0 4px;
+  font-size: 16px;
+}
+
+body[data-view="elder"] .memory-hint {
+  font-size: calc(15px * var(--fs));
+}
+
+/* 快捷记录在手机上排两列：4 个全宽按钮要占 240px，把「提取并记录」挤到屏幕外；
+   两列时每个仍有 ~165x56 的点击区，对老人够大。 */
+@media (max-width: 700px) {
+  #memoryQuickPicks {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  #memoryQuickPicks > button {
+    width: 100%;
+    min-height: 56px;
+    padding: 0 10px;
+  }
+}
+
+.quick-icon {
+  display: inline-block;
+  margin-right: 6px;
+  font-weight: 900;
+}
+
+/* ============ 复诊摘要（可打印） ============ */
+
+.report-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.report-controls .field {
+  margin: 0;
+  min-width: 180px;
+}
+
+.visit-sheet {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #ffffff;
+  padding: 22px 24px;
+}
+
+.sheet-head {
+  border-bottom: 2px solid var(--ink);
+  padding-bottom: 10px;
+  margin-bottom: 18px;
+}
+
+.sheet-head h2 {
+  margin: 0 0 6px;
+  font-size: 24px;
+  white-space: normal;
+}
+
+.sheet-head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.visit-sheet h3 {
+  margin: 22px 0 8px;
+  font-size: 17px;
+  white-space: normal;
+}
+
+.visit-sheet h3:first-of-type {
+  margin-top: 0;
+}
+
+.sheet-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.sheet-table th,
+.sheet-table td {
+  border: 1px solid var(--line);
+  padding: 7px 10px;
+  text-align: left;
+  vertical-align: top;
+  white-space: normal;
+}
+
+.sheet-table thead th {
+  background: var(--surface-strong);
+  font-size: 13px;
+}
+
+.sheet-kv th {
+  width: 140px;
+  background: var(--surface-strong);
+  font-weight: 800;
+}
+
+.sheet-sub {
+  margin: 12px 0 6px;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.sheet-list {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.sheet-foot {
+  margin-top: 24px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* 打印：只留摘要那一张纸，去掉导航、按钮和其它模块。 */
+@media print {
+  .topbar,
+  .rail,
+  .logs,
+  .nav-list,
+  .emergency-strip,
+  .hero-panel,
+  .no-print,
+  .toast-container,
+  .module-grid > .module:not(#visitReport) {
+    display: none !important;
+  }
+
+  body {
+    background: #ffffff;
+    padding: 0;
+  }
+
+  .app-shell,
+  .workspace,
+  .module-grid {
+    display: block;
+    width: auto;
+    max-width: none;
+    margin: 0;
+    padding: 0;
+    gap: 0;
+  }
+
+  .visit-report {
+    border: 0;
+    box-shadow: none;
+    padding: 0;
+  }
+
+  .visit-sheet {
+    border: 0;
+    padding: 0;
+  }
+
+  .sheet-table th,
+  .sheet-table td {
+    border-color: #999;
+  }
+
+  /* 表格行不要在分页处被切开 */
+  .sheet-table tr,
+  .sheet-list li {
+    break-inside: avoid;
+  }
+
+  .visit-sheet h3 {
+    break-after: avoid;
+  }
+
+  .report-controls {
+    display: none !important;
+  }
+}
+
+/* ============ 家属端：药量管理 ============ */
+
+.stock-panel {
+  margin-top: 22px;
+}
+
+.stock-panel h3 {
+  margin: 0 0 6px;
+  font-size: 16px;
+}
+
+.stock-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.stock-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #ffffff;
+  padding: 12px 14px;
+}
+
+/* 快吃完了：这是家属最需要立刻看到的信号 */
+.stock-item.is-low {
+  border-color: rgba(161, 30, 21, 0.42);
+  border-left: 6px solid var(--danger);
+  background: #fff6f5;
+}
+
+.stock-item.is-low .stock-main strong {
+  color: var(--danger);
+}
+
+.stock-item.is-editing {
+  border-color: var(--accent);
+  background: #f2fbf8;
+}
+
+.stock-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.stock-main strong {
+  display: block;
+  font-size: 16px;
+  overflow-wrap: anywhere;
+}
+
+.stock-main span {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.stock-edit {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.stock-edit strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.stock-edit .field {
+  margin: 6px 0;
+}
+
+.stock-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+@media (max-width: 700px) {
+  .stock-item {
+    flex-direction: column;
+  }
+
+  .stock-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .stock-actions > button {
+    width: 100%;
+    min-height: 44px;
+    padding: 0 8px;
+  }
+}
+
+/* ============ 家属端：体检指标趋势 ============ */
+
+.indicator-panel {
+  margin-top: 22px;
+}
+
+.indicator-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.indicator-head h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+/* 原来是 <strong> 内联在整句里，导致整段命中不了翻译词典；拆成独立段落靠样式做强调 */
+.indicator-disclaimer {
+  font-weight: 700;
+  color: var(--text, #1f3d38);
+}
+
+.indicator-form {
+  margin: 14px 0;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: #f2fbf8;
+  padding: 14px 16px;
+}
+
+.indicator-form.is-hidden {
+  display: none;
+}
+
+.indicator-rows {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.indicator-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.indicator-row select,
+.indicator-row input {
+  min-height: 44px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: #fff;
+  padding: 0 10px;
+  font-size: 15px;
+}
+
+.indicator-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.indicator-item {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.indicator-item.is-out {
+  border-color: rgba(161, 30, 21, 0.42);
+  border-left: 6px solid var(--danger);
+}
+
+.indicator-item > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  padding: 12px 14px;
+  list-style: none;
+}
+
+.indicator-item > summary::-webkit-details-marker {
+  display: none;
+}
+
+.indicator-item > summary::after {
+  content: "▾";
+  margin-left: auto;
+  color: var(--muted);
+}
+
+.indicator-item[open] > summary::after {
+  content: "▴";
+}
+
+.indicator-name {
+  font-weight: 850;
+}
+
+.indicator-item.is-out .indicator-name {
+  color: var(--danger);
+}
+
+.indicator-latest b {
+  font-size: 19px;
+  font-variant-numeric: tabular-nums;
+}
+
+.indicator-latest small {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.indicator-flag {
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.indicator-flag.is-out {
+  background: rgba(161, 30, 21, 0.13);
+  color: var(--danger);
+}
+
+.indicator-flag.is-ok {
+  background: rgba(26, 110, 68, 0.12);
+  color: var(--safe);
+}
+
+.indicator-delta {
+  font-size: 14px;
+  font-weight: 850;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 升高不代表一定变差，所以只用中性色区分方向，红绿留给「是否超出参考范围」。 */
+.indicator-delta.is-up { color: var(--warn); }
+.indicator-delta.is-down { color: var(--accent-strong); }
+.indicator-delta.is-flat { color: var(--muted); }
+
+.indicator-body {
+  border-top: 1px solid var(--line);
+  padding: 12px 14px 14px;
+}
+
+.indicator-meta {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.indicator-spark {
+  display: block;
+  margin-bottom: 10px;
+  max-width: 100%;
+}
+
+.indicator-history {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.indicator-history li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-top: 1px solid var(--line);
+  padding: 8px 0;
+  font-size: 14px;
+}
+
+.indicator-history li b {
+  font-variant-numeric: tabular-nums;
+}
+
+.indicator-history li button {
+  margin-left: auto;
+}
+
+@media (max-width: 700px) {
+  .indicator-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .indicator-row select {
+    grid-column: 1 / -1;
+  }
+
+  .indicator-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* ============ 适老最小尺寸兜底（M7） ============
+   长辈端承诺「按钮 ≥56px、正文 ≥18px」。上面零散规则容易漏，这里统一兜一层：
+   凡是长辈端可点的控件，最小高度不低于 56px；.ghost-button/.notif-bell/.role-chip
+   这几处此前是 48px/44px，实测不达标。 */
+body[data-view="elder"] .ghost-button,
+body[data-view="elder"] .notif-bell,
+body[data-view="elder"] .role-chip button,
+body[data-view="elder"] .secondary-button {
+  min-height: calc(56px * var(--fs));
+}
+
+body[data-view="elder"] .ghost-button,
+body[data-view="elder"] .secondary-button {
+  font-size: calc(18px * var(--fs));
+}
+
+body[data-view="elder"] .notif-bell {
+  width: calc(56px * var(--fs));
+  height: calc(56px * var(--fs));
+}
+
+/* ============ 邀请家属 ============ */
+
+.invite-create {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.invite-create .field {
+  flex: 1 1 220px;
+}
+
+.invite-result {
+  margin: 14px 0;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: #f2fbf8;
+  padding: 14px 16px;
+}
+
+.invite-link-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.invite-link-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.invite-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.invite-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+}
+
+.invite-pending {
+  margin-bottom: 18px;
+}
+
+/* 长辈端不出现邀请功能，但字号规则统一兜一层，避免以后误放进来时尺寸不达标 */
+body[data-view="elder"] .invite-list button {
+  min-height: calc(56px * var(--fs));
+}
+
+/* 「本人」标记：成员名单里标出自己那一行 */
+.self-tag {
+  display: inline-block;
+  margin-left: 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  padding: 1px 8px;
+  color: var(--accent-strong);
+  font-size: 0.82em;
+  font-weight: 800;
+}
+
+/* 数据来源提示：用来区分「真的查到了」和「拿不到数据时的替代文案」。
+   猜的和查到的不该长得一样。 */
+.source-note {
+  margin: 8px 0 0;
+  border-left: 3px solid var(--warn);
+  border-radius: 4px;
+  background: rgba(214, 138, 34, 0.1);
+  padding: 8px 12px;
+  color: var(--muted-strong);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+body[data-view="elder"] .source-note {
+  font-size: calc(18px * var(--fs));
 }

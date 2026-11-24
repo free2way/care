@@ -3,6 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0b665b" />
+    <!-- iOS 只有「添加到主屏幕」后打开的页面才允许 Web Push，所以 PWA 是提醒功能的前置条件。 -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="银发守护" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="icon" href="/icons/icon-192.png" />
+    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
     <title>TechGuard 银发守护服务台</title>
     <link rel="stylesheet" href="src/styles.css" />
   </head>
@@ -18,7 +26,7 @@
           <span class="status-dot"></span>
           <span>服务运行中</span>
         </div>
-        <button class="notif-bell is-hidden" id="notifBell" type="button" aria-label="通知中心">
+        <button class="notif-bell is-hidden" id="notifBell" type="button" aria-label="通知中心" aria-haspopup="true" aria-expanded="false">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
             <path d="M13.73 21a2 2 0 0 1-3.46 0" />
@@ -43,6 +51,7 @@
 
     <section class="login-screen" id="loginScreen">
       <div class="login-panel">
+        <div id="loginPanel">
         <p class="eyebrow">账号登录</p>
         <h2>家人长辈分开登录</h2>
         <p>家属负责设置吃药、任务和天气关怀，长辈登录后只看今天该做什么。</p>
@@ -62,6 +71,33 @@
           <span>家属端：caregiver / demo1234</span>
           <span>长辈端：elder / demo1234</span>
         </div>
+        </div>
+
+        <!-- 收到邀请链接时显示：让对方自己设置登录名和密码，不需要管理员代建账号 -->
+        <div id="invitePanel" class="is-hidden">
+          <p class="eyebrow">接受邀请</p>
+          <h2 id="inviteHeading">加入照护</h2>
+          <p id="inviteIntro"></p>
+          <form class="login-form" id="inviteForm">
+            <label class="field">
+              <span>您的称呼</span>
+              <input id="inviteDisplayName" type="text" autocomplete="name" placeholder="例如：小丽" />
+            </label>
+            <label class="field">
+              <span>设置登录名</span>
+              <input id="inviteUsername" type="text" autocomplete="username" placeholder="字母、数字、_ . -" />
+            </label>
+            <label class="field">
+              <span>设置密码</span>
+              <input id="invitePassword" type="password" autocomplete="new-password" placeholder="至少 8 位" />
+            </label>
+            <button class="primary-button" type="submit">接受邀请并登录</button>
+            <p class="form-error" id="inviteError"></p>
+          </form>
+          <div class="login-hints">
+            <span><a href="?">先不加入，返回登录</a></span>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -76,6 +112,7 @@
         </section>
 
         <nav class="nav-list" aria-label="模块导航">
+          <a href="#todayBoard" data-nav-role="elder" data-nav-target="#todayBoard">今日安排</a>
           <a href="#fraud" data-nav-role="elder" data-nav-target="#fraud">防骗检测</a>
           <a href="#bloodPressure" data-nav-role="elder" data-nav-target="#bloodPressure">血压记录</a>
           <a href="#checkupUpload" data-nav-role="elder" data-nav-target="#checkupUpload">体检分析</a>
@@ -88,7 +125,7 @@
           <a href="#healthRecords" data-nav-role="family" data-nav-target="#healthRecords">健康档案</a>
           <a href="#careRecords" data-nav-role="family" data-nav-target="#careRecords">照护记录</a>
           <a href="#roleManagement" data-nav-role="family" data-nav-target="#roleManagement">成员管理</a>
-          <a href="#logs" data-nav-role="shared" data-nav-target="#logs">操作日志</a>
+          <a href="#logs" data-nav-role="family" data-nav-target="#logs">操作日志</a>
         </nav>
 
         <section class="acceptance">
@@ -108,8 +145,12 @@
             <p class="eyebrow" id="workspaceEyebrow">长辈工作台</p>
             <h2 id="overview-title">今日提醒清单</h2>
             <p id="overviewCopy">查看家人设置的提醒，遇到可疑消息和出门安排时从这里处理。</p>
+            <label class="elder-switcher is-hidden" id="elderSwitcher">
+              <span>正在照护</span>
+              <select id="elderSwitcherSelect" aria-label="选择要照护的长辈"></select>
+            </label>
           </div>
-          <div class="metric-row" aria-label="核心指标">
+          <div class="metric-row" aria-label="核心指标" data-role-view="family">
             <div>
               <strong id="fraudCount">0</strong>
               <span>高危识别</span>
@@ -120,28 +161,55 @@
             </div>
             <div>
               <strong id="memoryCount">0</strong>
-              <span>记忆记录</span>
+              <span>血压记录</span>
             </div>
           </div>
         </section>
 
+        <section class="emergency-strip" id="emergencyStrip" data-role-view="elder" aria-label="紧急求助">
+          <div class="emergency-text">
+            <strong>遇到急事，先告诉家人</strong>
+            <span>身体不舒服、摔倒，或者有人催您转钱，点下面的按钮，家人马上会收到消息。</span>
+          </div>
+          <div class="emergency-actions">
+            <button class="danger-button" id="contactCaregiver" type="button">一键联系家人</button>
+            <a class="call-button is-hidden" id="callCaregiver" href="tel:">
+              <span class="call-button-label">打电话给家人</span>
+              <span class="call-button-number" id="callCaregiverNumber"></span>
+            </a>
+            <button class="safe-button" id="elderCheckIn" type="button">我没事，报个平安</button>
+          </div>
+        </section>
+
         <section class="module-grid">
-          <article class="module" id="elderReminders" data-role-view="elder">
+          <article class="module today-board" id="todayBoard" data-role-view="elder">
             <div class="module-heading">
               <div>
-                <p class="eyebrow">家人设置</p>
-                <h2>今日提醒</h2>
+                <p class="eyebrow">今天的安排</p>
+                <h2>今天要做的事</h2>
               </div>
-              <span class="small-badge" id="todayReminderCount">0 项</span>
+              <span class="small-badge" id="todayBoardCount">0 项</span>
             </div>
-            <div class="reminder-stack" id="elderReminderList">
-              <p class="muted">暂无家人设置的提醒。</p>
+            <p class="today-clock" id="todayClock"></p>
+            <button class="speak-button" id="speakToday" type="button" data-speak-kind="today">读给我听</button>
+            <div class="font-size-row" role="group" aria-label="字号">
+              <span class="font-size-label">字太小？</span>
+              <button class="font-size-option" type="button" data-font-size="normal" aria-pressed="true">标准</button>
+              <button class="font-size-option" type="button" data-font-size="large" aria-pressed="false">大</button>
+              <button class="font-size-option" type="button" data-font-size="xlarge" aria-pressed="false">特大</button>
             </div>
-            <div class="button-row push-row">
-              <button class="secondary-button" id="enablePush" type="button">开启手机提醒</button>
-              <button class="primary-button" id="contactCaregiver" type="button">一键联系家属</button>
+            <button class="push-nudge is-hidden" id="pushNudge" type="button"></button>
+            <div class="today-list" id="todayList">
+              <p class="muted">今天还没有安排。</p>
             </div>
-            <p class="send-status" id="pushStatus">安卓手机建议使用 Chrome 打开并允许通知。</p>
+            <section class="today-weather" id="todayWeather" hidden>
+              <span class="today-weather-label">今日天气</span>
+              <p id="todayWeatherText"></p>
+            </section>
+            <div class="push-row">
+              <button class="secondary-button" id="enablePush" type="button" aria-pressed="false">开启手机提醒</button>
+              <p class="send-status" id="pushStatus">还没有开启。开启后到点会直接弹出通知，不用一直开着这个页面。</p>
+            </div>
           </article>
 
           <article class="module" id="fraud" data-role-view="elder">
@@ -184,6 +252,8 @@
                 <p id="elderReply">输入内容后，小护会用老人听得懂的话说明风险。</p>
               </section>
             </div>
+
+            <button class="speak-button" id="speakFraud" type="button" data-speak-kind="fraud">读给我听</button>
 
             <section class="plain-output">
               <h3>风险原因</h3>
@@ -284,6 +354,12 @@
             <div class="alert-box" id="childAlert">
               暂无告警。请先运行一条高危反诈测试。
             </div>
+            <section class="missed-panel">
+              <h3>最近一周漏服</h3>
+              <div class="missed-list" id="missedList">
+                <p class="muted">没有漏服记录。</p>
+              </div>
+            </section>
           </article>
 
           <article class="module care-config" id="careConfig" data-role-view="family">
@@ -305,9 +381,18 @@
                     <input id="medicineName" type="text" placeholder="例如：降压药" />
                   </label>
                   <label class="field">
-                    <span>用药时间</span>
+                    <span>用药时间（可选多个）</span>
                     <input id="medicineTime" type="time" />
                   </label>
+                  <div class="quick-message-row" id="medicineTimePresets" aria-label="常用用药时间">
+                    <button class="secondary-button" type="button" data-med-time="08:00">早上 08:00</button>
+                    <button class="secondary-button" type="button" data-med-time="12:30">中午 12:30</button>
+                    <button class="secondary-button" type="button" data-med-time="18:00">晚上 18:00</button>
+                    <button class="secondary-button" type="button" data-med-time="21:00">睡前 21:00</button>
+                  </div>
+                  <div class="time-chip-row" id="medicineTimeChips" aria-live="polite">
+                    <span class="muted">还没有选时间。点上面的常用时间，或在时间框里自己选。</span>
+                  </div>
                   <label class="field">
                     <span>说明</span>
                     <input id="medicineDose" type="text" placeholder="例如：饭后，一片" />
@@ -356,6 +441,22 @@
               <p class="send-status" id="sendStatus">尚未发送提醒。</p>
             </section>
 
+            <section class="contact-panel">
+              <div>
+                <h3>我的联系电话</h3>
+                <p class="muted">
+                  填上之后，长辈端求助条里会出现「打电话给家人」按钮，长辈点一下就直接拨号。
+                  飞书没配好的时候，这是最可靠的求助方式。
+                </p>
+              </div>
+              <label class="field">
+                <span>手机号码</span>
+                <input id="caregiverPhone" type="tel" inputmode="tel" autocomplete="tel" placeholder="例如：13800138000" />
+              </label>
+              <button class="primary-button" id="saveCaregiverPhone" type="button">保存电话</button>
+              <p class="send-status" id="phoneStatus">还没有填写联系电话。</p>
+            </section>
+
             <div class="reminder-columns">
               <section>
                 <h3>吃药计划</h3>
@@ -370,6 +471,17 @@
                 </div>
               </section>
             </div>
+
+            <section class="stock-panel">
+              <h3>药量管理</h3>
+              <p class="muted">
+                登记每盒药还剩多少片，长辈确认吃药时会自动扣减。快吃完时这里会标红，并提醒您去开药。
+                按药名归集，所以一天吃几次的药只需要登记一次。
+              </p>
+              <div class="stock-list" id="stockList">
+                <p class="muted">正在加载…</p>
+              </div>
+            </section>
           </article>
 
           <article class="module" id="taskConfig" data-role-view="family">
@@ -430,6 +542,7 @@
             <section class="plain-output">
               <h3>今日天气关怀</h3>
               <p id="weatherCareText">设置地区后会生成适合奶奶看的天气提醒。</p>
+              <p class="source-note is-hidden" id="weatherSourceNote"></p>
             </section>
           </article>
 
@@ -467,6 +580,32 @@
             <section class="report-list" id="familyCheckupList">
               <p class="muted">暂无体检报告分析。</p>
             </section>
+
+            <section class="indicator-panel">
+              <div class="indicator-head">
+                <h3>体检指标趋势</h3>
+                <button class="secondary-button" id="toggleIndicatorForm" type="button">添加指标</button>
+              </div>
+              <p class="muted">照着体检报告把关键数字录进来，就能看出每次是好转还是恶化。</p>
+              <p class="muted indicator-disclaimer">参考范围是成人常用值，请以报告上标注的范围为准。</p>
+
+              <div class="indicator-form is-hidden" id="indicatorForm">
+                <label class="field">
+                  <span>检查日期</span>
+                  <input type="date" id="indicatorDate" />
+                </label>
+                <div class="indicator-rows" id="indicatorRows"></div>
+                <div class="button-row">
+                  <button class="secondary-button" id="addIndicatorRow" type="button">再加一项</button>
+                  <button class="primary-button" id="saveIndicators" type="button">保存</button>
+                  <button class="ghost-button" id="cancelIndicators" type="button">取消</button>
+                </div>
+              </div>
+
+              <div class="indicator-list" id="indicatorList">
+                <p class="muted">正在加载…</p>
+              </div>
+            </section>
           </article>
 
           <article class="module" id="memory" data-role-view="elder">
@@ -489,6 +628,15 @@
               </div>
             </label>
 
+            <!-- 图标单独放在 span 里：按钮的文字节点必须正好是中文词条本身，
+                 i18n 才翻译得到（「✓ 我吃过药了」整串是匹配不上的）。 -->
+            <div class="quick-message-row" id="memoryQuickPicks" aria-label="常用记录">
+              <button class="secondary-button" type="button" data-memory-quick="我吃过药了"><span class="quick-icon" aria-hidden="true">✓</span>我吃过药了</button>
+              <button class="secondary-button" type="button" data-memory-quick="我吃过饭了"><span class="quick-icon" aria-hidden="true">✓</span>我吃过饭了</button>
+              <button class="secondary-button" type="button" data-memory-quick="我出去走走"><span class="quick-icon" aria-hidden="true">✓</span>我出去走走</button>
+              <button class="secondary-button danger-quick" type="button" data-memory-quick="我有点不舒服"><span class="quick-icon" aria-hidden="true">!</span>我不舒服</button>
+            </div>
+
             <div class="button-row">
               <button class="primary-button" id="saveMemory" type="button">提取并记录</button>
               <button class="secondary-button" id="askMedication" type="button">问：今天吃药了吗</button>
@@ -496,8 +644,10 @@
 
             <section class="plain-output">
               <h3>小护回复</h3>
-              <p id="memoryReply">记录后再查询，小护会先看历史记录，再回答老人。</p>
+              <p id="memoryReply">说一句今天做了什么，小护会记下来，家人也能看到。</p>
             </section>
+
+            <p class="memory-hint">身体不舒服这类记录会自动提醒家人查看。</p>
 
             <div class="table-wrap">
               <table>
@@ -511,23 +661,10 @@
                 </thead>
                 <tbody id="memoryTable">
                   <tr>
-                    <td colspan="4">暂无记忆记录</td>
+                    <td colspan="4">暂无生活记录</td>
                   </tr>
                 </tbody>
               </table>
-            </div>
-          </article>
-
-          <article class="module" id="elderTasks" data-role-view="elder">
-            <div class="module-heading">
-              <div>
-                <p class="eyebrow">家人安排</p>
-                <h2>今日任务</h2>
-              </div>
-              <span class="small-badge" id="todayTaskCount">0 项</span>
-            </div>
-            <div class="reminder-stack" id="elderTaskList">
-              <p class="muted">暂无今日任务。</p>
             </div>
           </article>
 
@@ -567,7 +704,9 @@
             <section class="plain-output">
               <h3>给老人的回复</h3>
               <p id="travelReply">小护会优先给少换乘、少走路、好理解的路线。</p>
+              <p class="source-note is-hidden" id="travelSourceNote"></p>
             </section>
+            <button class="speak-button" id="speakTravel" type="button" data-speak-kind="travel">读给我听</button>
           </article>
 
           <article class="module" id="careRecords" data-role-view="family">
@@ -578,7 +717,7 @@
               </div>
               <span class="small-badge">只读查看</span>
             </div>
-            <p class="muted">亲属可以查看长辈端保存的用药、血压、吃饭和出门记录，但不能替长辈编造记录。</p>
+            <p class="muted">长辈自己记录的用药、吃饭、睡觉、出门和身体情况。亲属只能查看和删除记错的条目，不能替长辈编造记录。</p>
             <div class="table-wrap">
               <table>
                 <thead>
@@ -591,11 +730,27 @@
                 </thead>
                 <tbody id="familyMemoryTable">
                   <tr>
-                    <td colspan="4">暂无照护记录</td>
+                    <td colspan="4">暂无生活记录</td>
                   </tr>
                 </tbody>
               </table>
             </div>
+            <section class="daily-summary">
+              <h3>今日概览</h3>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>项目</th>
+                      <th>今天</th>
+                      <th>完成情况</th>
+                      <th>说明</th>
+                    </tr>
+                  </thead>
+                  <tbody id="dailySummaryTable"></tbody>
+                </table>
+              </div>
+            </section>
           </article>
 
           <article class="module" id="roleManagement" data-role-view="family">
@@ -607,24 +762,26 @@
               <span class="small-badge">亲属可设置</span>
             </div>
 
-            <div class="role-form">
+            <!-- 邀请流程：家属点「生成邀请链接」，把链接发给对方，对方自己设置登录名和密码。
+                 邀请 token 只在生成时显示一次（库里只存哈希）。 -->
+            <div class="invite-create">
               <label class="field">
-                <span>姓名</span>
-                <input id="memberName" type="text" placeholder="例如：王阿姨" />
+                <span>对方与长辈的关系</span>
+                <input id="inviteRelation" type="text" placeholder="例如：女儿" maxlength="16" />
               </label>
-              <label class="field">
-                <span>关系</span>
-                <input id="memberRelation" type="text" placeholder="例如：护工" />
-              </label>
-              <label class="field">
-                <span>角色</span>
-                <select id="memberRole">
-                  <option value="elder">长辈</option>
-                  <option value="family">亲属</option>
-                </select>
-              </label>
-              <button class="primary-button" id="addMember" type="button">添加成员</button>
+              <button class="primary-button" id="createInvite" type="button">生成邀请链接</button>
             </div>
+            <p class="form-error" id="inviteCreateError"></p>
+
+            <div class="invite-result is-hidden" id="inviteResult">
+              <p class="muted">把这个链接发给对方，7 天内有效、只能使用一次。关闭后无法再次查看，请立即复制。</p>
+              <div class="invite-link-row">
+                <input id="inviteLink" type="text" readonly />
+                <button class="secondary-button" id="copyInviteLink" type="button">复制</button>
+              </div>
+            </div>
+
+            <div class="invite-pending" id="invitePending"></div>
 
             <div class="table-wrap">
               <table>
@@ -639,6 +796,35 @@
                 <tbody id="roleTable"></tbody>
               </table>
             </div>
+          </article>
+
+          <article class="module visit-report" id="visitReport" data-role-view="family">
+            <div class="module-heading no-print">
+              <div>
+                <p class="eyebrow">看病用</p>
+                <h2>复诊摘要</h2>
+              </div>
+              <span class="small-badge">可打印</span>
+            </div>
+            <p class="muted no-print">
+              带长辈去医院时，把最近一段时间的用药、血压、漏服和体检要点打出来给医生看，不用举着手机翻。
+            </p>
+            <div class="report-controls no-print">
+              <label class="field">
+                <span>统计范围</span>
+                <select id="visitSummaryDays">
+                  <option value="7">最近 7 天</option>
+                  <option value="30" selected>最近 30 天</option>
+                  <option value="90">最近 90 天</option>
+                  <option value="180">最近 180 天</option>
+                </select>
+              </label>
+              <button class="primary-button" id="loadVisitSummary" type="button">生成摘要</button>
+              <button class="secondary-button" id="printVisitSummary" type="button">打印 / 另存为 PDF</button>
+            </div>
+            <section class="visit-sheet" id="visitSheet">
+              <p class="muted">正在准备…</p>
+            </section>
           </article>
 
           <article class="module" id="notifPrefs" data-role-view="family">
@@ -680,6 +866,10 @@
                 <span>一键求助</span>
               </label>
               <label class="pref-item">
+                <input type="checkbox" data-pref="safe_checkin" checked />
+                <span>长辈报平安</span>
+              </label>
+              <label class="pref-item">
                 <input type="checkbox" data-pref="feishu_enabled" checked />
                 <span>飞书推送</span>
               </label>
@@ -688,13 +878,12 @@
           </article>
         </section>
 
-        <section class="logs" id="logs">
+        <section class="logs" id="logs" data-role-view="family">
           <div class="module-heading">
             <div>
               <p class="eyebrow">使用记录</p>
               <h2>操作日志</h2>
             </div>
-            <button class="secondary-button" id="resetDemo" type="button">重置演示数据</button>
           </div>
           <ol id="eventLog" class="event-log">
             <li>等待开始使用。</li>
