@@ -1,9 +1,14 @@
 data/*.db
 data/*.db-shm
 data/*.db-wal
+# seed 脚本每次运行都会自动备份原库，别让它出现在 git status 里
+data/*.bak-*
 node_modules/
 .env
 .env.*
 outputs/
-docs/
+# docs/ 下的内部文档默认不跟踪；这里用 docs/* 而不是 docs/，
+# 因为父目录整个被排除时，「!」反选是不生效的。放行的只有下面这一个文件。
+docs/*
+!docs/scheduled-reminders.md
 TechGuard-验收文档-v0.1.md
